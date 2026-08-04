@@ -1859,6 +1859,14 @@ void Session::exec()
     // We always want a resizable window with High DPI enabled
     Uint32 defaultWindowFlags = SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE;
 
+    // In windowed mode, create the streaming window with no title bar/border.
+    // On GNOME/Wayland the decoration can't be removed via env (disabling libdecor
+    // just hands it to mutter's server-side decorations), so request borderless
+    // explicitly. PaperWM tiles it; Super+drag still moves it if it floats.
+    if (m_Preferences->windowMode == StreamingPreferences::WM_WINDOWED) {
+        defaultWindowFlags |= SDL_WINDOW_BORDERLESS;
+    }
+
     // If we're starting in windowed mode and the Moonlight GUI is maximized or
     // minimized, match that with the streaming window.
     if (!m_IsFullScreen && m_QtWindow != nullptr) {
