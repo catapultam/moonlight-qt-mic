@@ -1539,6 +1539,30 @@ Flickable {
                         StreamingPreferences.reverseScrollDirection = checked
                     }
                 }
+
+                Label {
+                    id: scrollMultiplierTitle
+                    width: parent.width
+                    text: qsTr("Mouse scroll speed: %1x").arg(scrollMultiplierSlider.value.toFixed(1))
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Slider {
+                    id: scrollMultiplierSlider
+                    width: parent.width
+                    from: 0.0
+                    to: 10.0
+                    stepSize: 0.1
+                    snapMode: Slider.SnapAlways
+                    value: StreamingPreferences.scrollMultiplier
+                    onValueChanged: {
+                        StreamingPreferences.scrollMultiplier = value
+                    }
+
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Scales scroll wheel output sent to the host (1.0x = unchanged)")
+                }
             }
         }
 

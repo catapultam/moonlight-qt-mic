@@ -207,6 +207,7 @@ private:
     bool m_GamepadMouse;
     bool m_SwapMouseButtons;
     bool m_ReverseScrollDirection;
+    double m_ScrollMultiplier;
     bool m_SwapFaceButtons;
 
     bool m_MouseWasInVideoRegion;
