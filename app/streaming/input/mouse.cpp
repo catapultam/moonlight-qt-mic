@@ -199,34 +199,92 @@ void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
     }
 
 #if SDL_VERSION_ATLEAST(2, 0, 18)
-    if (event->preciseY != 0.0f) {
-        // Invert the scroll direction if needed
-        if (m_ReverseScrollDirection) {
-            event->preciseY = -event->preciseY;
-        }
+    // Optional scroll diagnostics: launch with MOONLIGHT_SCROLL_DEBUG=1 to log
+    // what each wheel event carries and what gets sent to the host.
+    static const bool s_ScrollDebug = (SDL_getenv("MOONLIGHT_SCROLL_DEBUG") != nullptr);
 
+    if (!m_AbsoluteMouseMode) {
+        // Relative (game capture) mode: emit clean, discrete one-notch-per-detent
+        // scrolling. SDL's integer y/x already count whole wheel notches and behave
+        // the same whether the wheel is in hi-res or low-res mode, whereas the
+        // fractional preciseY stream made hosts fire partial/erratic scroll "clicks"
+        // (weapon switch, item cycle, etc.). The multiplier scales the notch count;
+        // a moved wheel always sends at least one notch.
 #ifdef Q_OS_DARWIN
         // HACK: Clamp the scroll values on macOS to prevent OS scroll acceleration
         // from generating wild scroll deltas when scrolling quickly.
-        event->preciseY = SDL_clamp(event->preciseY, -1.0f, 1.0f);
+        event->y = SDL_clamp(event->y, -1, 1);
+        event->x = SDL_clamp(event->x, -1, 1);
 #endif
 
-        LiSendHighResScrollEvent((short)(event->preciseY * 120)); // WHEEL_DELTA
+        if (event->y != 0) {
+            double scaled = event->y * m_ScrollMultiplier;
+            int notches = (int)(scaled < 0 ? scaled - 0.5 : scaled + 0.5);
+            if (notches == 0) {
+                notches = (event->y > 0) ? 1 : -1;
+            }
+            if (m_ReverseScrollDirection) {
+                notches = -notches;
+            }
+            // Keep notches * 120 in the range of a short
+            notches = SDL_clamp(notches, SDL_MIN_SINT16 / 120, SDL_MAX_SINT16 / 120);
+            if (s_ScrollDebug) {
+                SDL_Log("Scroll V: y=%d preciseY=%.3f mult=%.2f -> %d notches (delta %d)",
+                        event->y, event->preciseY, m_ScrollMultiplier, notches, notches * 120);
+            }
+            LiSendHighResScrollEvent((short)(notches * 120)); // WHEEL_DELTA
+        }
+        if (event->x != 0) {
+            double scaled = event->x * m_ScrollMultiplier;
+            int notches = (int)(scaled < 0 ? scaled - 0.5 : scaled + 0.5);
+            if (notches == 0) {
+                notches = (event->x > 0) ? 1 : -1;
+            }
+            if (m_ReverseScrollDirection) {
+                notches = -notches;
+            }
+            // Keep notches * 120 in the range of a short
+            notches = SDL_clamp(notches, SDL_MIN_SINT16 / 120, SDL_MAX_SINT16 / 120);
+            LiSendHighResHScrollEvent((short)(notches * 120)); // WHEEL_DELTA
+        }
     }
-
-    if (event->preciseX != 0.0f) {
-        // Invert the scroll direction if needed
-        if (m_ReverseScrollDirection) {
-            event->preciseX = -event->preciseX;
-        }
+    else {
+        // Absolute (remote-desktop) mode: smooth high-resolution scrolling.
+        if (event->preciseY != 0.0f) {
+            if (m_ReverseScrollDirection) {
+                event->preciseY = -event->preciseY;
+            }
 
 #ifdef Q_OS_DARWIN
-        // HACK: Clamp the scroll values on macOS to prevent OS scroll acceleration
-        // from generating wild scroll deltas when scrolling quickly.
-        event->preciseX = SDL_clamp(event->preciseX, -1.0f, 1.0f);
+            // HACK: Clamp the scroll values on macOS to prevent OS scroll acceleration
+            // from generating wild scroll deltas when scrolling quickly.
+            event->preciseY = SDL_clamp(event->preciseY, -1.0f, 1.0f);
 #endif
 
-        LiSendHighResHScrollEvent((short)(event->preciseX * 120)); // WHEEL_DELTA
+            // Keep the delta in the range of a short
+            float delta = SDL_clamp(event->preciseY * 120 * m_ScrollMultiplier,
+                                    (float)SDL_MIN_SINT16, (float)SDL_MAX_SINT16);
+            if (s_ScrollDebug) {
+                SDL_Log("Scroll V (abs): preciseY=%.3f mult=%.2f -> %d",
+                        event->preciseY, m_ScrollMultiplier, (short)delta);
+            }
+            LiSendHighResScrollEvent((short)delta); // WHEEL_DELTA
+        }
+        if (event->preciseX != 0.0f) {
+            if (m_ReverseScrollDirection) {
+                event->preciseX = -event->preciseX;
+            }
+
+#ifdef Q_OS_DARWIN
+            // See comment above
+            event->preciseX = SDL_clamp(event->preciseX, -1.0f, 1.0f);
+#endif
+
+            // See comment above
+            float delta = SDL_clamp(event->preciseX * 120 * m_ScrollMultiplier,
+                                    (float)SDL_MIN_SINT16, (float)SDL_MAX_SINT16);
+            LiSendHighResHScrollEvent((short)delta); // WHEEL_DELTA
+        }
     }
 #else
     if (event->y != 0) {
@@ -240,7 +298,7 @@ void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
         event->y = SDL_clamp(event->y, -1, 1);
 #endif
 
-        LiSendScrollEvent((signed char)event->y);
+        LiSendScrollEvent((signed char)(event->y * m_ScrollMultiplier));
     }
 
     if (event->x != 0) {
@@ -254,7 +312,7 @@ void SdlInputHandler::handleMouseWheelEvent(SDL_MouseWheelEvent* event)
         event->x = SDL_clamp(event->x, -1, 1);
 #endif
 
-        LiSendHScrollEvent((signed char)event->x);
+        LiSendHScrollEvent((signed char)(event->x * m_ScrollMultiplier));
     }
 #endif
 }

@@ -1565,6 +1565,34 @@ Flickable {
                         StreamingPreferences.reverseScrollDirection = checked
                     }
                 }
+
+                Label {
+                    id: scrollMultiplierTitle
+                    width: parent.width
+                    text: qsTr("Mouse scroll speed: %1x").arg(scrollMultiplierSlider.value.toFixed(1))
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Slider {
+                    id: scrollMultiplierSlider
+                    width: parent.width
+                    from: 0.0
+                    to: 10.0
+                    stepSize: 0.1
+                    snapMode: Slider.SnapAlways
+                    value: StreamingPreferences.scrollMultiplier
+                    onValueChanged: {
+                        StreamingPreferences.scrollMultiplier = value
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Scales the scroll wheel output sent to the host.") + "\n\n" +
+                                  qsTr("When the mouse is optimized for games, a scroll event of one or more whole notches sends a whole number of notches, and at least one. So 0.0x does not stop scrolling, and a scroll event of less than one notch sends nothing.") + "\n\n" +
+                                  qsTr("When the mouse is optimized for remote desktop, smooth scrolling is scaled, and 0.0x stops it.")
+                }
             }
         }
 
