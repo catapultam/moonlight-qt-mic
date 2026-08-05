@@ -579,6 +579,7 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_FlushingWindowEventsRef(0),
       m_ShouldExit(false),
       m_ForceResume(false),
+      m_QuitAppBeforeLaunch(false),
       m_HasPendingDisplayMode(false),
       m_PendingWidth(0),
       m_PendingHeight(0),
@@ -1857,11 +1858,21 @@ Session* Session::createRestartSession()
 
     Session* session = new Session(m_Computer, m_App, m_Preferences);
 
-    // We were streaming this app a moment ago, so the host still has it running.
-    // The computer poller doesn't run during a stream, so currentGameId can still
-    // say nothing is running and would make the new session ask for a launch,
-    // which the host rejects or which restarts the app and loses its state.
-    session->m_ForceResume = true;
+    // Sunshine and Apollo size the display they create for a session when the app
+    // is launched, and a resume attaches to the display that already exists. So
+    // the new mode only reaches the host if the app is quit and started again,
+    // which closes whatever is running in it. The user opts in per preference.
+    if (m_Preferences->restartAppOnFollow()) {
+        session->m_QuitAppBeforeLaunch = true;
+    }
+    else {
+        // We were streaming this app a moment ago, so the host still has it
+        // running. The computer poller doesn't run during a stream, so
+        // currentGameId can still say nothing is running and would make the new
+        // session ask for a launch, which the host rejects or which restarts the
+        // app and loses its state.
+        session->m_ForceResume = true;
+    }
 
     session->m_HasPendingDisplayMode = true;
     session->m_PendingWidth = m_RestartWidth;
@@ -2157,9 +2168,42 @@ bool Session::startConnectionAsync()
 
     QString rtspSessionUrl;
 
+    // One request object for the quit and the launch, on the same address, port
+    // and certificate the rest of the session uses
+    NvHTTP http(m_Computer);
+
+    // Consumed here, so a retry of this session can never repeat the quit
+    bool quitAppBeforeLaunch = m_QuitAppBeforeLaunch;
+    m_QuitAppBeforeLaunch = false;
+
+    // A display-follow restart that must resize the host's display quits the app
+    // first, which destroys the display the host made for that app session. The
+    // launch below then builds a new one at the mode we are about to request.
+    if (quitAppBeforeLaunch) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Quitting the host app so it can be started at the new display mode");
+
+        try {
+            http.quitApp();
+        } catch (const GfeHttpResponseException& e) {
+            // The app may have already exited, or it may belong to another client.
+            // Either way the launch below reports anything that still blocks us.
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Quitting the host app failed: %s",
+                        e.toQString().toUtf8().constData());
+        } catch (const QtNetworkReplyException& e) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Quitting the host app failed: %s",
+                        e.toQString().toUtf8().constData());
+        }
+
+        // The host has no app running now, so the request below must be a launch.
+        // m_ForceResume is never set together with this.
+        SDL_assert(!m_ForceResume);
+    }
+
     try {
-        NvHTTP http(m_Computer);
-        http.startApp((m_ForceResume || m_Computer->currentGameId != 0) ? "resume" : "launch",
+        http.startApp((!quitAppBeforeLaunch && (m_ForceResume || m_Computer->currentGameId != 0)) ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
                       enableGameOptimizations,

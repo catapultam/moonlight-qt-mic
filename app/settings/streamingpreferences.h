@@ -121,6 +121,7 @@ public:
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
     Q_PROPERTY(bool autoNativeRes MEMBER autoNativeRes NOTIFY autoNativeResChanged)
     Q_PROPERTY(bool autoNativeFollow MEMBER autoNativeFollow NOTIFY autoNativeFollowChanged)
+    Q_PROPERTY(bool autoNativeFollowQuit MEMBER autoNativeFollowQuit NOTIFY autoNativeFollowQuitChanged)
     Q_PROPERTY(int bitrateKbps MEMBER bitrateKbps NOTIFY bitrateChanged)
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
@@ -179,6 +180,7 @@ public:
     int fps;
     bool autoNativeRes;
     bool autoNativeFollow;
+    bool autoNativeFollowQuit;
 
     // Set by the command line parser only. Never serialized.
     bool autoNativeResOverridden = false;
@@ -196,6 +198,13 @@ public:
     bool followDisplayMode() const
     {
         return useNativeDisplayMode() && autoNativeFollow;
+    }
+
+    // Whether that reconnect should also restart the host app, which is the only
+    // way the host builds its display at the new size
+    bool restartAppOnFollow() const
+    {
+        return followDisplayMode() && autoNativeFollowQuit;
     }
 
     int bitrateKbps;
@@ -241,6 +250,7 @@ signals:
     void displayModeChanged();
     void autoNativeResChanged();
     void autoNativeFollowChanged();
+    void autoNativeFollowQuitChanged();
     void bitrateChanged();
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();

@@ -176,6 +176,27 @@ Flickable {
                                   qsTr("The host app keeps running during the reconnect. The stream is interrupted for a few seconds while the session restarts.")
                 }
 
+                CheckBox {
+                    id: autoNativeFollowQuitCheck
+                    width: parent.width
+                    hoverEnabled: true
+                    text: qsTr("Restart the host app when following")
+                    font.pointSize: 12
+                    visible: autoNativeResCheck.visible
+                    enabled: StreamingPreferences.autoNativeRes && StreamingPreferences.autoNativeFollow
+                    checked: StreamingPreferences.autoNativeFollowQuit
+                    onCheckedChanged: {
+                        StreamingPreferences.autoNativeFollowQuit = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("The host builds its display at the requested size only when the app starts. Without this option, a reconnect joins the display the host already made, and the host keeps the old size.") + "\n\n" +
+                                  qsTr("With this option, Moonlight quits the host app during the reconnect and starts it again, so the host builds its display at the new size.") + "\n\n" +
+                                  qsTr("Everything running in that app is closed. Leave this option off for games you do not want to lose.")
+                }
+
                 Row {
                     spacing: 5
                     width: parent.width

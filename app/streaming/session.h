@@ -302,6 +302,7 @@ private:
     // restart is handed to the replacement session object by createRestartSession()
     // and never touches the settings store.
     bool m_ForceResume;
+    bool m_QuitAppBeforeLaunch;
     bool m_HasPendingDisplayMode;
     int m_PendingWidth;
     int m_PendingHeight;
