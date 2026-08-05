@@ -120,6 +120,7 @@ public:
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
     Q_PROPERTY(bool autoNativeRes MEMBER autoNativeRes NOTIFY autoNativeResChanged)
+    Q_PROPERTY(bool autoNativeFollow MEMBER autoNativeFollow NOTIFY autoNativeFollowChanged)
     Q_PROPERTY(int bitrateKbps MEMBER bitrateKbps NOTIFY bitrateChanged)
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
@@ -177,6 +178,7 @@ public:
     int height;
     int fps;
     bool autoNativeRes;
+    bool autoNativeFollow;
 
     // Set by the command line parser only. Never serialized.
     bool autoNativeResOverridden = false;
@@ -187,6 +189,13 @@ public:
     Q_INVOKABLE bool useNativeDisplayMode() const
     {
         return autoNativeRes && !autoNativeResOverridden;
+    }
+
+    // Whether the stream should reconnect at the new display's native mode when
+    // the streaming window is moved to a display with a different mode
+    bool followDisplayMode() const
+    {
+        return useNativeDisplayMode() && autoNativeFollow;
     }
 
     int bitrateKbps;
@@ -231,6 +240,7 @@ public:
 signals:
     void displayModeChanged();
     void autoNativeResChanged();
+    void autoNativeFollowChanged();
     void bitrateChanged();
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();

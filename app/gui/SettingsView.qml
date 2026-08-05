@@ -156,6 +156,26 @@ Flickable {
                                   qsTr("When automatic bitrate adjustment is enabled, the stream uses the default bitrate for the chosen mode. The bitrate slider keeps showing the stored value. When it is disabled, the stored bitrate is used unchanged.")
                 }
 
+                CheckBox {
+                    id: autoNativeFollowCheck
+                    width: parent.width
+                    hoverEnabled: true
+                    text: qsTr("Follow the window across displays")
+                    font.pointSize: 12
+                    visible: autoNativeResCheck.visible
+                    enabled: StreamingPreferences.autoNativeRes
+                    checked: StreamingPreferences.autoNativeFollow
+                    onCheckedChanged: {
+                        StreamingPreferences.autoNativeFollow = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("When the stream window moves to a display with a different native mode, Moonlight reconnects the stream at that mode after a short delay.") + "\n\n" +
+                                  qsTr("The host app keeps running during the reconnect. The stream is interrupted for a few seconds while the session restarts.")
+                }
+
                 Row {
                     spacing: 5
                     width: parent.width

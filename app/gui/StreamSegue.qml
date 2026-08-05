@@ -69,6 +69,38 @@ Item {
         // Re-enable GUI gamepad usage now
         SdlGamepadKeyNavigation.enable()
 
+        // The session ended to reconnect at another display's native mode. Stream
+        // the same app again in place of this segue instead of returning to the UI
+        // or quitting, so the reconnect looks like a normal stream start. The host
+        // app kept running, so this is a resume.
+        // The replaced segue stays alive as a child of the StackView, as the quit
+        // segue does, and the new session briefly blocks the UI thread waiting for
+        // the old one to finish cleanup. Both match how the existing launch paths
+        // behave, and the automatic restart count is capped.
+        if (!streamSegueErrorDialog.text && session !== null && session.isRestartPending()) {
+            var restartSession = session.createRestartSession()
+            var restartComponent = restartSession !== null ? Qt.createComponent("StreamSegue.qml") : null
+            var restartSegue = restartComponent !== null && restartComponent.status === Component.Ready ?
+                        restartComponent.createObject(stackView, {
+                                                          "appName": appName,
+                                                          "session": restartSession,
+                                                          "isResume": true,
+                                                          "quitAfter": quitAfter
+                                                      }) : null
+
+            if (restartSegue !== null) {
+                // Show the Qt window again so the connection UI is visible
+                window.visible = true
+
+                // Avoid the push transition animation
+                stackView.replace(stackView.currentItem, restartSegue, StackView.Immediate)
+                return
+            }
+
+            // Fall through to the normal end of stream if the segue can't be built
+            console.error("Unable to restart the stream for the new display")
+        }
+
         // Pop the StreamSegue off the stack if this is a GUI-based app launch
         if (!quitAfter) {
             stackView.pop()

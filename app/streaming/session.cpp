@@ -48,6 +48,18 @@
 
 #define CONN_TEST_SERVER "qt.conntest.moonlight-stream.org"
 
+// Display-follow tuning. The debounce coalesces the burst of display change events
+// that a dock transition or a monitor hotplug produces.
+#define DISPLAY_FOLLOW_DEBOUNCE_MS 2000
+#define DISPLAY_FOLLOW_STARTUP_GRACE_MS 5000
+#define DISPLAY_FOLLOW_MIN_RESTART_INTERVAL_MS 10000
+
+// A stream that has been running longer than this starts a new restart chain.
+// Anything faster is treated as part of the same chain and capped, so a display
+// arrangement we keep bouncing between can't restart us indefinitely.
+#define DISPLAY_FOLLOW_CHAIN_RESET_MS 120000
+#define DISPLAY_FOLLOW_MAX_CHAIN 3
+
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clStageStarting,
     nullptr,
@@ -66,6 +78,9 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
 
 Session* Session::s_ActiveSession;
 QSemaphore Session::s_ActiveSessionSemaphore(1);
+bool Session::s_HasAutoRestarted = false;
+Uint32 Session::s_LastAutoRestartTime = 0;
+int Session::s_AutoRestartChainCount = 0;
 
 void Session::clStageStarting(int stage)
 {
@@ -563,6 +578,22 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_MouseEmulationRefCount(0),
       m_FlushingWindowEventsRef(0),
       m_ShouldExit(false),
+      m_ForceResume(false),
+      m_HasPendingDisplayMode(false),
+      m_PendingWidth(0),
+      m_PendingHeight(0),
+      m_PendingFps(0),
+      m_HasPendingDisplayBounds(false),
+      m_PendingDisplayBounds{},
+      m_RestartPending(false),
+      m_RestartWidth(0),
+      m_RestartHeight(0),
+      m_RestartFps(0),
+      m_HasRestartDisplayBounds(false),
+      m_RestartDisplayBounds{},
+      m_DisplayFollowArmed(false),
+      m_DisplayFollowDeadline(0),
+      m_StreamStartTicks(0),
       m_AsyncConnectionSuccess(false),
       m_PortTestResults(0),
       m_OpusDecoder(nullptr),
@@ -585,6 +616,7 @@ Session::~Session()
 bool Session::initialize(QQuickWindow* qtWindow, QSize maximumResolution)
 {
     m_QtWindow = qtWindow;
+    m_MaximumResolution = maximumResolution;
 
 #ifdef Q_OS_DARWIN
     if (qEnvironmentVariableIntValue("I_WANT_BUGGY_FULLSCREEN") == 0) {
@@ -645,14 +677,13 @@ bool Session::initialize(QQuickWindow* qtWindow, QSize maximumResolution)
     // so the display must be resolved before then.
 #ifdef Q_OS_DARWIN
     // The notch handling above keys off the configured resolution
-    Q_UNUSED(maximumResolution);
     if (m_Preferences->useNativeDisplayMode()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Auto-native resolution is not supported on macOS. Using the configured resolution and FPS.");
     }
 #else
     if (m_Preferences->useNativeDisplayMode()) {
-        applyNativeDisplayMode(maximumResolution);
+        applyNativeDisplayMode();
     }
 #endif
 
@@ -1283,10 +1314,21 @@ private:
 
     void run() override
     {
-        // Only quit the running app if our session terminated gracefully
+        // Read this before the signals below, since the UI consumes the request
+        // as soon as it sees sessionFinished()
+        bool restartPending = m_Session->m_RestartPending;
+
+        // Any other ending breaks the chain of automatic restarts
+        if (!restartPending) {
+            Session::s_AutoRestartChainCount = 0;
+        }
+
+        // Only quit the running app if our session terminated gracefully, and
+        // never when we are about to reconnect to it
         bool shouldQuit =
                 !m_Session->m_UnexpectedTermination &&
-                m_Session->m_Preferences->quitAppAfter;
+                m_Session->m_Preferences->quitAppAfter &&
+                !restartPending;
 
         // Notify the UI
         if (shouldQuit) {
@@ -1528,21 +1570,16 @@ bool Session::getNativeDisplayMode(int displayIndex, int& width, int& height, in
     return true;
 }
 
-void Session::applyNativeDisplayMode(QSize maximumResolution)
+// Adjusts a detected display mode to something we can stream, or rejects it.
+// The display-follow trigger runs this too, so that a mode we would refuse never
+// becomes a restart target and never lands us in a restart loop.
+bool Session::validateDisplayMode(int& width, int& height, int& fps)
 {
-    int width, height, fps;
-
-    if (!getNativeDisplayMode(getDisplayIndexForQtWindow(true), width, height, fps)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to determine the display mode. Using the configured resolution and FPS.");
-        return;
-    }
-
     if (width > StreamUtils::k_MaxSupportedDimension || height > StreamUtils::k_MaxSupportedDimension) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Display mode %dx%d is too large to stream. Using the configured resolution and FPS.",
+                    "Display mode %dx%d is too large to stream.",
                     width, height);
-        return;
+        return false;
     }
 
     // Encoders and decoders work in pairs of pixels
@@ -1551,9 +1588,9 @@ void Session::applyNativeDisplayMode(QSize maximumResolution)
 
     if (width < 2 || height < 2) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Display mode %dx%d is too small to stream. Using the configured resolution and FPS.",
+                    "Display mode %dx%d is too small to stream.",
                     width, height);
-        return;
+        return false;
     }
 
     // The settings UI prunes its resolution list by total pixels, so cap this
@@ -1561,13 +1598,12 @@ void Session::applyNativeDisplayMode(QSize maximumResolution)
     // not its pixel count is accepted here, as it is there, which a portrait
     // display can do. An unset or invalid limit means the probe didn't run or
     // failed, and nothing is capped.
-    if (!maximumResolution.isEmpty() &&
-            (qint64)width * height > (qint64)maximumResolution.width() * maximumResolution.height()) {
+    if (!m_MaximumResolution.isEmpty() &&
+            (qint64)width * height > (qint64)m_MaximumResolution.width() * m_MaximumResolution.height()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Display mode %dx%d exceeds the decoder's maximum resolution of %dx%d. "
-                    "Using the configured resolution and FPS.",
-                    width, height, maximumResolution.width(), maximumResolution.height());
-        return;
+                    "Display mode %dx%d exceeds the decoder's maximum resolution of %dx%d.",
+                    width, height, m_MaximumResolution.width(), m_MaximumResolution.height());
+        return false;
     }
 
     if (fps < StreamUtils::k_MinSupportedFps || fps > StreamUtils::k_MaxSupportedFps) {
@@ -1582,6 +1618,11 @@ void Session::applyNativeDisplayMode(QSize maximumResolution)
         fps = configuredFps;
     }
 
+    return true;
+}
+
+void Session::applyDisplayMode(int width, int height, int fps)
+{
     m_StreamConfig.width = width;
     m_StreamConfig.height = height;
 
@@ -1603,6 +1644,246 @@ void Session::applyNativeDisplayMode(QSize maximumResolution)
                 m_StreamConfig.fps, m_StreamConfig.bitrate);
 }
 
+void Session::applyNativeDisplayMode()
+{
+    int width, height, fps;
+
+    // A restart handed us the mode of the display the stream window was moved to.
+    // The Qt window may be on a different display than the stream window was, so
+    // detecting the mode again here would undo the move that caused the restart.
+    if (m_HasPendingDisplayMode) {
+        m_HasPendingDisplayMode = false;
+
+        width = m_PendingWidth;
+        height = m_PendingHeight;
+        fps = m_PendingFps;
+
+        // The mode is used even if that display has since been unplugged, which
+        // leaves the stream at a size no display matches until the user restarts
+        // it. Detecting the mode again here would be worse: it would silently
+        // undo the move the user made.
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Restarting at the display mode %dx%dx%d requested by the previous session",
+                    width, height, fps);
+    }
+    else if (!getNativeDisplayMode(getDisplayIndexForQtWindow(true), width, height, fps)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to determine the display mode. Using the configured resolution and FPS.");
+        return;
+    }
+
+    if (!validateDisplayMode(width, height, fps)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Using the configured resolution and FPS.");
+        return;
+    }
+
+    applyDisplayMode(width, height, fps);
+}
+
+// Starts or refreshes the debounce that follows the stream window to a new display.
+// Display change events arrive in bursts while a dock or monitor change settles, so
+// nothing is decided until the burst stops.
+void Session::armDisplayFollowRestart()
+{
+#ifdef Q_OS_DARWIN
+    // initialize() keeps the configured mode here, so a restart could never
+    // change anything
+    return;
+#endif
+
+    if (!m_Preferences->followDisplayMode() || m_RestartPending) {
+        return;
+    }
+
+    // Minimizing on Windows moves the window to -32000,-32000, which reports as a
+    // display change. The decoder recreation path below guards against the same
+    // thing. A minimized window is not a display the user is watching on any
+    // platform, so this is not limited to Windows.
+    if (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_MINIMIZED) {
+        return;
+    }
+
+    m_DisplayFollowArmed = true;
+    m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
+}
+
+// Called once per event loop iteration. Returns true when the session must end to
+// be restarted at the new display's native mode.
+bool Session::pollDisplayFollowRestart()
+{
+    if (!m_DisplayFollowArmed) {
+        return false;
+    }
+
+    // Wraparound-safe comparison
+    if ((Sint32)(SDL_GetTicks() - m_DisplayFollowDeadline) < 0) {
+        return false;
+    }
+
+    // A request that is rejected below is dropped rather than deferred: the next
+    // display change re-arms it. The counters a rejection leaves behind are also
+    // not rewound if the UI later declines to relaunch. Both err toward not
+    // restarting.
+    m_DisplayFollowArmed = false;
+
+    // A session that is already ending stays ended: the connection dropped
+    // (m_UnexpectedTermination), the user asked to quit the stream (a queued
+    // SDL_QUIT), or the user asked to quit Moonlight itself, which sets
+    // m_ShouldExit before pushing its SDL_QUIT.
+    if (m_UnexpectedTermination || m_ShouldExit || SDL_HasEvent(SDL_QUIT)) {
+        return false;
+    }
+
+    // The window is not on a display the user can see, and Windows parks
+    // minimized windows at -32000,-32000, which reports as a display change
+    if (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_MINIMIZED) {
+        return false;
+    }
+
+    // Window placement events at stream start can report displays we never
+    // settled on, so ignore everything until the window has stopped moving.
+    if (SDL_GetTicks() - m_StreamStartTicks < DISPLAY_FOLLOW_STARTUP_GRACE_MS) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Ignoring a display change during stream startup");
+        return false;
+    }
+
+    // SDL ticks run for the life of the process, so they stay comparable across
+    // sessions and are immune to the clock steps a wall clock would see
+    Uint32 now = SDL_GetTicks();
+    if (s_HasAutoRestarted && now - s_LastAutoRestartTime < DISPLAY_FOLLOW_MIN_RESTART_INTERVAL_MS) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Ignoring a display change less than %d ms after the last automatic restart",
+                    DISPLAY_FOLLOW_MIN_RESTART_INTERVAL_MS);
+        return false;
+    }
+
+    // A stream that ran for a while before the display changed is a new chain.
+    // The count is also cleared when a session ends for any other reason.
+    if (SDL_GetTicks() - m_StreamStartTicks > DISPLAY_FOLLOW_CHAIN_RESET_MS) {
+        s_AutoRestartChainCount = 0;
+    }
+
+    if (s_AutoRestartChainCount >= DISPLAY_FOLLOW_MAX_CHAIN) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Not restarting again: %d automatic restarts in a row. "
+                    "The stream window is not staying on the display it is sent to.",
+                    s_AutoRestartChainCount);
+        return false;
+    }
+
+    int displayIndex = SDL_GetWindowDisplayIndex(m_Window);
+    if (displayIndex < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_GetWindowDisplayIndex() failed: %s",
+                    SDL_GetError());
+        return false;
+    }
+
+    // SDL knows which display the stream window is on, so no Qt screen matching
+    // is needed here.
+    SDL_DisplayMode mode;
+    SDL_Rect safeArea;
+    if (!StreamUtils::getNativeDesktopMode(displayIndex, &mode, &safeArea)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to read the native mode of SDL display %d",
+                    displayIndex);
+        return false;
+    }
+
+    if (mode.refresh_rate <= 0) {
+        mode.refresh_rate = 60;
+    }
+
+    int width = mode.w;
+    int height = mode.h;
+    int fps = StreamUtils::normalizeRefreshRate(mode.refresh_rate);
+
+    // Compare what we would actually request, not the raw mode
+    if (!validateDisplayMode(width, height, fps)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Staying on the current stream mode.");
+        return false;
+    }
+
+    // An explicit --fps on the command line pins the frame rate, so comparing it
+    // would restart us for a difference the new session cannot apply
+    int targetFps = m_Preferences->fpsOverridden ? m_StreamConfig.fps : fps;
+
+    if (width == m_StreamConfig.width && height == m_StreamConfig.height && targetFps == m_StreamConfig.fps) {
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Restarting the stream at %dx%dx%d for SDL display %d (was %dx%dx%d)",
+                width, height, fps, displayIndex,
+                m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps);
+
+    m_RestartPending = true;
+    m_RestartWidth = width;
+    m_RestartHeight = height;
+    m_RestartFps = fps;
+
+    // Best effort: let the next session place its window on this display rather
+    // than on whatever display the Qt UI is on. Bounds identify the display across
+    // the session boundary, where indexes may have been renumbered.
+    m_HasRestartDisplayBounds = SDL_GetDisplayBounds(displayIndex, &m_RestartDisplayBounds) == 0;
+
+    s_HasAutoRestarted = true;
+    s_LastAutoRestartTime = now;
+    s_AutoRestartChainCount++;
+
+    return true;
+}
+
+Session* Session::createRestartSession()
+{
+    if (!m_RestartPending) {
+        return nullptr;
+    }
+
+    // Consume the request. Nothing outside this object holds the target mode, so
+    // an unconsumed request dies with this session.
+    m_RestartPending = false;
+
+    Session* session = new Session(m_Computer, m_App, m_Preferences);
+
+    // We were streaming this app a moment ago, so the host still has it running.
+    // The computer poller doesn't run during a stream, so currentGameId can still
+    // say nothing is running and would make the new session ask for a launch,
+    // which the host rejects or which restarts the app and loses its state.
+    session->m_ForceResume = true;
+
+    session->m_HasPendingDisplayMode = true;
+    session->m_PendingWidth = m_RestartWidth;
+    session->m_PendingHeight = m_RestartHeight;
+    session->m_PendingFps = m_RestartFps;
+    session->m_HasPendingDisplayBounds = m_HasRestartDisplayBounds;
+    session->m_PendingDisplayBounds = m_RestartDisplayBounds;
+
+    return session;
+}
+
+// Identifies a display by its bounds, which survive the display renumbering that
+// a monitor change between sessions can cause
+static int getDisplayIndexForBounds(const SDL_Rect& bounds)
+{
+    for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
+        SDL_Rect displayBounds;
+
+        if (SDL_GetDisplayBounds(i, &displayBounds) == 0 &&
+                displayBounds.x == bounds.x && displayBounds.y == bounds.y &&
+                displayBounds.w == bounds.w && displayBounds.h == bounds.h) {
+            return i;
+        }
+    }
+
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "No SDL display matches the bounds of the display the stream window was moved to");
+    return -1;
+}
+
 void Session::getWindowDimensions(int& x, int& y,
                                   int& width, int& height)
 {
@@ -1612,10 +1893,16 @@ void Session::getWindowDimensions(int& x, int& y,
         displayIndex = SDL_GetWindowDisplayIndex(m_Window);
         SDL_assert(displayIndex >= 0);
     }
-    // Create our window on the same display that Qt's UI
-    // was being displayed on.
     else {
-        displayIndex = qMax(getDisplayIndexForQtWindow(false), 0);
+        // A display-follow restart wants the window back on the display the user
+        // moved it to, which is not necessarily the one the Qt UI is on. This is
+        // best effort: the window manager can still place the window elsewhere,
+        // and the stream resolution is unaffected either way.
+        int followIndex = m_HasPendingDisplayBounds ? getDisplayIndexForBounds(m_PendingDisplayBounds) : -1;
+
+        // Otherwise create our window on the same display that Qt's UI
+        // was being displayed on.
+        displayIndex = followIndex >= 0 ? followIndex : qMax(getDisplayIndexForQtWindow(false), 0);
     }
 
     SDL_Rect usableBounds;
@@ -1864,7 +2151,7 @@ bool Session::startConnectionAsync()
 
     try {
         NvHTTP http(m_Computer);
-        http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
+        http.startApp((m_ForceResume || m_Computer->currentGameId != 0) ? "resume" : "launch",
                       m_Computer->isNvidiaServerSoftware,
                       m_App.id, &m_StreamConfig,
                       enableGameOptimizations,
@@ -2254,6 +2541,9 @@ void Session::exec()
 
     int currentDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
 
+    // The display-follow grace period runs from here
+    m_StreamStartTicks = SDL_GetTicks();
+
     // Now that we're about to stream, any SDL_QUIT event is expected
     // unless it comes from the connection termination callback where
     // (m_UnexpectedTermination is set back to true).
@@ -2284,6 +2574,9 @@ void Session::exec()
         // and other problems.
         if (!SDL_WaitEventTimeout(&event, 1000)) {
             presence.runCallbacks();
+            if (pollDisplayFollowRestart()) {
+                goto DispatchDeferredCleanup;
+            }
             continue;
         }
 #else
@@ -2300,6 +2593,9 @@ void Session::exec()
             SDL_Delay(10);
 #endif
             presence.runCallbacks();
+            if (pollDisplayFollowRestart()) {
+                goto DispatchDeferredCleanup;
+            }
             continue;
         }
 #endif
@@ -2366,6 +2662,14 @@ void Session::exec()
                 break;
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();
+                break;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            case SDL_WINDOWEVENT_DISPLAY_CHANGED:
+#else
+            // Older SDL has no display change event, so watch every move
+            case SDL_WINDOWEVENT_MOVED:
+#endif
+                armDisplayFollowRestart();
                 break;
             }
 
@@ -2611,6 +2915,13 @@ void Session::exec()
                 break;
             }
             break;
+        }
+
+        // The debounce also expires between events, not just during the waits
+        // above. This runs after the event is dispatched so that a quit event is
+        // never swallowed by a restart.
+        if (pollDisplayFollowRestart()) {
+            goto DispatchDeferredCleanup;
         }
     }
 

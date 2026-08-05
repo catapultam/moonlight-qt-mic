@@ -106,6 +106,18 @@ public:
     Q_INVOKABLE bool initialize(QQuickWindow* qtWindow, QSize maximumResolution);
     Q_INVOKABLE void start();
     Q_INVOKABLE void interrupt();
+
+    // True if this session ended to be immediately restarted at another display's
+    // native mode. Only meaningful once sessionFinished() has been emitted.
+    Q_INVOKABLE bool isRestartPending() const
+    {
+        return m_RestartPending;
+    }
+
+    // Builds the replacement session for a pending restart, carrying the target
+    // display mode over. Returns nullptr if no restart is pending.
+    Q_INVOKABLE Session* createRestartSession();
+
     Q_PROPERTY(QStringList launchWarnings MEMBER m_LaunchWarnings NOTIFY launchWarningsChanged);
 
     static
@@ -171,7 +183,15 @@ private:
 
     bool getNativeDisplayMode(int displayIndex, int& width, int& height, int& fps);
 
-    void applyNativeDisplayMode(QSize maximumResolution);
+    bool validateDisplayMode(int& width, int& height, int& fps);
+
+    void applyDisplayMode(int width, int height, int fps);
+
+    void applyNativeDisplayMode();
+
+    void armDisplayFollowRestart();
+
+    bool pollDisplayFollowRestart();
 
     void getWindowDimensions(int& x, int& y,
                              int& width, int& height);
@@ -275,6 +295,29 @@ private:
     QStringList m_LaunchWarnings;
     bool m_ShouldExit;
 
+    // Decoder limit handed to initialize(), reused when validating a display mode
+    QSize m_MaximumResolution;
+
+    // Display-follow state. All of it dies with the session: the target mode of a
+    // restart is handed to the replacement session object by createRestartSession()
+    // and never touches the settings store.
+    bool m_ForceResume;
+    bool m_HasPendingDisplayMode;
+    int m_PendingWidth;
+    int m_PendingHeight;
+    int m_PendingFps;
+    bool m_HasPendingDisplayBounds;
+    SDL_Rect m_PendingDisplayBounds;
+    bool m_RestartPending;
+    int m_RestartWidth;
+    int m_RestartHeight;
+    int m_RestartFps;
+    bool m_HasRestartDisplayBounds;
+    SDL_Rect m_RestartDisplayBounds;
+    bool m_DisplayFollowArmed;
+    Uint32 m_DisplayFollowDeadline;
+    Uint32 m_StreamStartTicks;
+
     bool m_AsyncConnectionSuccess;
     int m_PortTestResults;
 
@@ -297,4 +340,12 @@ private:
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;
     static QSemaphore s_ActiveSessionSemaphore;
+
+    // Rate limiting for automatic restarts. These outlive individual sessions, but
+    // they are only timing data: they can never cause a restart, only prevent one.
+    // Accesses are serialized by s_ActiveSessionSemaphore, since only the active
+    // session's main thread and its cleanup task touch them.
+    static bool s_HasAutoRestarted;
+    static Uint32 s_LastAutoRestartTime;
+    static int s_AutoRestartChainCount;
 };
