@@ -7,6 +7,7 @@
 #include <Limelight.h>
 
 #include <QUrl>
+#include <QStringList>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 
@@ -133,6 +134,10 @@ public:
     QByteArray
     getXmlStringFromHex(QString xml,
                         QString tagName);
+
+    static
+    QStringList
+    getServerCommandList(QString serverInfo);
 
     QString
     openConnectionToString(QUrl baseUrl,

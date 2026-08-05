@@ -197,6 +197,37 @@ Flickable {
                                   qsTr("Everything running in that app is closed. Leave this option off for games you do not want to lose.")
                 }
 
+                CheckBox {
+                    id: hostDisplaySyncCheck
+                    width: parent.width
+                    hoverEnabled: true
+                    text: qsTr("Set the host display to match the stream")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.hostDisplaySync
+                    onCheckedChanged: {
+                        StreamingPreferences.hostDisplaySync = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("After the stream connects, Moonlight runs a command on the host. Configure the commands in the host web UI. The host must be Apollo.") + "\n\n" +
+                                  qsTr("Moonlight prefers a command whose name contains the resolution it asked for, for example \"Res 2560x1600\". A name that also contains the frame rate wins over one that does not.") + "\n\n" +
+                                  qsTr("If no command names the mode, Moonlight runs the command named below. Such a command must read the client mode from the host environment, which is correct only for a new app launch.")
+                }
+
+                TextField {
+                    id: hostDisplayCmdField
+                    width: parent.width
+                    enabled: StreamingPreferences.hostDisplaySync
+                    text: StreamingPreferences.hostDisplayCmd
+                    placeholderText: qsTr("Command name")
+                    font.pointSize: 12
+                    onTextChanged: {
+                        StreamingPreferences.hostDisplayCmd = text
+                    }
+                }
+
                 Row {
                     spacing: 5
                     width: parent.width

@@ -284,6 +284,26 @@ NvHTTP::getDisplayModeList(QString serverInfo)
     return modes;
 }
 
+QStringList
+NvHTTP::getServerCommandList(QString serverInfo)
+{
+    QXmlStreamReader xmlReader(serverInfo);
+    QStringList commands;
+
+    // Apollo reports one element per configured command, in configuration order,
+    // and only to clients that hold the server command permission. The index that
+    // the client sends is the position of the command in this list.
+    while (!xmlReader.atEnd()) {
+        while (xmlReader.readNextStartElement()) {
+            if (xmlReader.name() == QString("ServerCommand")) {
+                commands.append(xmlReader.readElementText());
+            }
+        }
+    }
+
+    return commands;
+}
+
 QVector<NvApp>
 NvHTTP::getAppList()
 {

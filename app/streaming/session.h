@@ -162,6 +162,8 @@ private:
 
     bool startConnectionAsync();
 
+    void sendHostDisplayCommand();
+
     bool validateLaunch(SDL_Window* testWindow);
 
     void emitLaunchWarning(QString text);

@@ -19,6 +19,8 @@
 #define SER_AUTONATIVERES "autonativeres"
 #define SER_AUTONATIVEFOLLOW "autonativefollow"
 #define SER_AUTONATIVEFOLLOWQUIT "autonativefollowquit"
+#define SER_HOSTDISPLAYSYNC "hostdisplaysync"
+#define SER_HOSTDISPLAYCMD "hostdisplaycmd"
 #define SER_BITRATE "bitrate"
 #define SER_UNLOCK_BITRATE "unlockbitrate"
 #define SER_AUTOADJUSTBITRATE "autoadjustbitrate"
@@ -149,6 +151,8 @@ void StreamingPreferences::reload()
     autoNativeRes = settings.value(SER_AUTONATIVERES, false).toBool();
     autoNativeFollow = settings.value(SER_AUTONATIVEFOLLOW, false).toBool();
     autoNativeFollowQuit = settings.value(SER_AUTONATIVEFOLLOWQUIT, false).toBool();
+    hostDisplaySync = settings.value(SER_HOSTDISPLAYSYNC, false).toBool();
+    hostDisplayCmd = settings.value(SER_HOSTDISPLAYCMD, "Resolution").toString();
     enableYUV444 = settings.value(SER_YUV444, false).toBool();
     bitrateKbps = settings.value(SER_BITRATE, getDefaultBitrate(width, height, fps, enableYUV444)).toInt();
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
@@ -356,6 +360,8 @@ void StreamingPreferences::save()
     settings.setValue(SER_AUTONATIVERES, autoNativeRes);
     settings.setValue(SER_AUTONATIVEFOLLOW, autoNativeFollow);
     settings.setValue(SER_AUTONATIVEFOLLOWQUIT, autoNativeFollowQuit);
+    settings.setValue(SER_HOSTDISPLAYSYNC, hostDisplaySync);
+    settings.setValue(SER_HOSTDISPLAYCMD, hostDisplayCmd);
     settings.setValue(SER_BITRATE, bitrateKbps);
     settings.setValue(SER_UNLOCK_BITRATE, unlockBitrate);
     settings.setValue(SER_AUTOADJUSTBITRATE, autoAdjustBitrate);

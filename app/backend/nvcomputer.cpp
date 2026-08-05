@@ -63,6 +63,7 @@ NvComputer::NvComputer(QSettings& settings)
     this->isSupportedServerVersion = true;
     this->externalPort = this->remoteAddress.port();
     this->activeHttpsPort = 0;
+    this->serverPermissions = 0;
 }
 
 void NvComputer::setRemoteAddress(QHostAddress address)
@@ -211,6 +212,10 @@ NvComputer::NvComputer(NvHTTP& http, QString serverInfo)
     this->state = NvComputer::CS_ONLINE;
     this->pendingQuit = false;
     this->isSupportedServerVersion = CompatFetcher::isGfeVersionSupported(this->gfeVersion);
+
+    // Apollo extensions. Both are absent on GFE and Sunshine hosts.
+    this->serverCommands = NvHTTP::getServerCommandList(serverInfo);
+    this->serverPermissions = NvHTTP::getXmlString(serverInfo, "Permission").toInt();
 }
 
 bool NvComputer::wake() const
@@ -571,6 +576,11 @@ bool NvComputer::update(const NvComputer& that)
     ASSIGN_IF_CHANGED(gpuModel);
     ASSIGN_IF_CHANGED_AND_NONNULL(serverCert);
     ASSIGN_IF_CHANGED_AND_NONEMPTY(displayModes);
+
+    // Assigned unconditionally. A stale list would make the client send the index
+    // of a command that the host no longer has at that position.
+    ASSIGN_IF_CHANGED(serverCommands);
+    ASSIGN_IF_CHANGED(serverPermissions);
 
     if (!that.appList.isEmpty()) {
         // updateAppList() handles merging client-side attributes

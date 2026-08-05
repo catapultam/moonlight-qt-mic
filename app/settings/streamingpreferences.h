@@ -122,6 +122,8 @@ public:
     Q_PROPERTY(bool autoNativeRes MEMBER autoNativeRes NOTIFY autoNativeResChanged)
     Q_PROPERTY(bool autoNativeFollow MEMBER autoNativeFollow NOTIFY autoNativeFollowChanged)
     Q_PROPERTY(bool autoNativeFollowQuit MEMBER autoNativeFollowQuit NOTIFY autoNativeFollowQuitChanged)
+    Q_PROPERTY(bool hostDisplaySync MEMBER hostDisplaySync NOTIFY hostDisplaySyncChanged)
+    Q_PROPERTY(QString hostDisplayCmd MEMBER hostDisplayCmd NOTIFY hostDisplayCmdChanged)
     Q_PROPERTY(int bitrateKbps MEMBER bitrateKbps NOTIFY bitrateChanged)
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
@@ -181,6 +183,8 @@ public:
     bool autoNativeRes;
     bool autoNativeFollow;
     bool autoNativeFollowQuit;
+    bool hostDisplaySync;
+    QString hostDisplayCmd;
 
     // Set by the command line parser only. Never serialized.
     bool autoNativeResOverridden = false;
@@ -251,6 +255,8 @@ signals:
     void autoNativeResChanged();
     void autoNativeFollowChanged();
     void autoNativeFollowQuitChanged();
+    void hostDisplaySyncChanged();
+    void hostDisplayCmdChanged();
     void bitrateChanged();
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();

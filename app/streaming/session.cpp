@@ -2304,8 +2304,107 @@ bool Session::startConnectionAsync()
         return false;
     }
 
+    // LiStartConnection() only returns success once every stage is up, including
+    // the control stream, so this is the last point before the stream is
+    // interactive. A restart builds a new Session, so this runs once per session.
+    sendHostDisplayCommand();
+
     emit connectionStarted();
     return true;
+}
+
+// Apollo permission bit that lets a client see and run the host's server commands
+#define SERVER_CMD_PERMISSION 0x00100000
+
+// Runs a command on the host so that the host display matches the mode this
+// session negotiated
+void Session::sendHostDisplayCommand()
+{
+    const QStringList commands = m_Computer->serverCommands;
+    QString commandNames = commands.isEmpty() ? QString("none") : commands.join(", ");
+
+    if (!commands.isEmpty() || (m_Computer->serverPermissions & SERVER_CMD_PERMISSION)) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Host server commands: %s (server command permission: %s)",
+                    qPrintable(commandNames),
+                    (m_Computer->serverPermissions & SERVER_CMD_PERMISSION) ? "yes" : "no");
+    }
+
+    if (!m_Preferences->hostDisplaySync) {
+        return;
+    }
+
+    QString resolution = QString("%1x%2").arg(m_StreamConfig.width).arg(m_StreamConfig.height);
+    QString fps = QString::number(m_StreamConfig.fps);
+    int index = -1;
+    const char* rule = nullptr;
+
+    // A command that names the mode is preferred. The host fills the client mode
+    // into the environment only on a launch, so a generic command that reads the
+    // environment is wrong after a resume.
+    for (int i = 0; i < commands.count(); i++) {
+        if (!commands.at(i).contains(resolution, Qt::CaseInsensitive)) {
+            continue;
+        }
+
+        if (index < 0) {
+            index = i;
+            rule = "resolution";
+        }
+
+        QString remainder = commands.at(i);
+        remainder.remove(resolution, Qt::CaseInsensitive);
+        if (remainder.contains(fps)) {
+            index = i;
+            rule = "resolution and FPS";
+            break;
+        }
+    }
+
+    if (index < 0) {
+        for (int i = 0; i < commands.count(); i++) {
+            if (commands.at(i).compare(m_Preferences->hostDisplayCmd, Qt::CaseInsensitive) == 0) {
+                index = i;
+                rule = "name";
+                break;
+            }
+        }
+    }
+
+    if (index < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "No host command names the mode %s@%s or matches '%s'. Host commands: %s",
+                    qPrintable(resolution),
+                    qPrintable(fps),
+                    qPrintable(m_Preferences->hostDisplayCmd),
+                    qPrintable(commandNames));
+        return;
+    }
+
+    // The wire format carries the index in one byte
+    if (index > 255) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Host command '%s' is at index %d, which is out of range",
+                    qPrintable(commands.at(index)),
+                    index);
+        return;
+    }
+
+    int err = LiSendExecServerCmd((uint8_t)index);
+    if (err != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Failed to run host command '%s' (index %d): %d",
+                    qPrintable(commands.at(index)),
+                    index,
+                    err);
+        return;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Running host command '%s' (index %d), matched by %s",
+                qPrintable(commands.at(index)),
+                index,
+                rule);
 }
 
 void Session::flushWindowEvents()
