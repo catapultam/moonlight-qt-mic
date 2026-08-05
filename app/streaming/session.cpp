@@ -1704,6 +1704,14 @@ void Session::armDisplayFollowRestart()
         return;
     }
 
+    // A tiling window manager re-arms this many times per move, so only report
+    // the start of a burst
+    if (!m_DisplayFollowArmed) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Display change detected; checking for a new native mode in %d ms",
+                    DISPLAY_FOLLOW_DEBOUNCE_MS);
+    }
+
     m_DisplayFollowArmed = true;
     m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
 }
@@ -2665,6 +2673,14 @@ void Session::exec()
                 break;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
             case SDL_WINDOWEVENT_DISPLAY_CHANGED:
+            // A compositor-initiated move between displays can arrive as a resize
+            // and nothing else. Observed on GNOME Wayland with PaperWM over
+            // sdl2-compat/SDL3: the window is resized to the new display's work
+            // area and no display change event ever follows. The decoder
+            // recreation code below relies on the same fall-through. Arming here
+            // is safe for an ordinary resize, because the poll re-reads the
+            // window's display and stops when the mode still matches.
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
 #else
             // Older SDL has no display change event, so watch every move
             case SDL_WINDOWEVENT_MOVED:
