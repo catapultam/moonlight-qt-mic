@@ -4,6 +4,7 @@ import QtQuick.Window 2.2
 
 import SdlGamepadKeyNavigation 1.0
 import Session 1.0
+import StreamingPreferences 1.0
 import SystemProperties 1.0
 
 Item {
@@ -121,6 +122,14 @@ Item {
         session.sessionFinished.connect(sessionFinished)
         session.readyForDeletion.connect(sessionReadyForDeletion)
 
+        // The session bounds the display mode it picks by the decoder's maximum
+        // resolution, which this probe produces. This is a backstop: PcView
+        // launches start it at startup and command line launches start it in
+        // CliStartStreamSegue.
+        if (StreamingPreferences.useNativeDisplayMode()) {
+            SystemProperties.startAsyncLoad()
+        }
+
         // Ensure the SystemProperties async thread is finished,
         // since it may currently be using the SDL video subsystem
         SystemProperties.waitForAsyncLoad()
@@ -172,7 +181,7 @@ Item {
             SdlGamepadKeyNavigation.disable()
 
             // Initialize the session and probe for host/client capabilities
-            if (!session.initialize(window)) {
+            if (!session.initialize(window, SystemProperties.maximumResolution)) {
                 sessionFinished(0);
                 sessionReadyForDeletion();
                 return;

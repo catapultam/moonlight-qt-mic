@@ -2,6 +2,8 @@ import QtQuick 2.0
 import QtQuick.Controls 2.2
 
 import ComputerManager 1.0
+import StreamingPreferences 1.0
+import SystemProperties 1.0
 
 Item {
     function onSearchingComputer() {
@@ -36,6 +38,14 @@ Item {
     StackView.onActivated: {
         if (!launcher.isExecuted()) {
             toolBar.visible = false
+
+            // The stream needs the decoder's maximum resolution to bound the
+            // display mode it picks. Starting the probe here lets the decoder
+            // tests run while we look for the host instead of stalling the
+            // stream later. The display enumeration it does first is synchronous.
+            if (StreamingPreferences.useNativeDisplayMode()) {
+                SystemProperties.startAsyncLoad()
+            }
 
             launcher.searchingComputer.connect(onSearchingComputer)
             launcher.searchingApp.connect(onSearchingApp)

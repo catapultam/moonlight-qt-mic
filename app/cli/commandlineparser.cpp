@@ -1,4 +1,5 @@
 #include "commandlineparser.h"
+#include "streaming/streamutils.h"
 
 #include <QCommandLineParser>
 #include <QRegularExpression>
@@ -403,21 +404,34 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
         }
     }
 
+    // An explicit resolution on the command line wins over the auto native
+    // resolution preference, without disturbing the stored value.
+    if (displaySet) {
+        preferences->autoNativeResOverridden = true;
+    }
+
     // Resolve --fps option
     if (parser.isSet("fps")) {
         preferences->fps = parser.getIntOption("fps");
-        if (!inRange(preferences->fps, 10, 480)) {
-            fprintf(stderr, "Warning: FPS is out of the supported range (10 - 480 FPS). Performance may suffer!\n");
+        preferences->fpsOverridden = true;
+        if (!inRange(preferences->fps, StreamUtils::k_MinSupportedFps, StreamUtils::k_MaxSupportedFps)) {
+            fprintf(stderr, "Warning: FPS is out of the supported range (%d - %d FPS). Performance may suffer!\n",
+                    StreamUtils::k_MinSupportedFps, StreamUtils::k_MaxSupportedFps);
         }
     }
 
     // Resolve --bitrate option
     if (parser.isSet("bitrate")) {
         preferences->bitrateKbps = parser.getIntOption("bitrate");
+        preferences->bitrateOverridden = true;
         if (!inRange(preferences->bitrateKbps, 500, 500000)) {
             fprintf(stderr, "Warning: Bitrate is out of the supported range (500 - 500000 Kbps). Performance may suffer!\n");
         }
     } else if (displaySet || parser.isSet("fps")) {
+        // An explicit --bitrate is handled above, so this only supplies a default
+        // for the mode named on the command line. If the session resolves the
+        // display mode itself, it recomputes this again when bitrate auto-adjust
+        // is enabled.
         preferences->bitrateKbps = preferences->getDefaultBitrate(
             preferences->width, preferences->height, preferences->fps, preferences->enableYUV444);
     }

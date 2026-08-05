@@ -103,7 +103,7 @@ public:
     explicit Session(NvComputer* computer, NvApp& app, StreamingPreferences *preferences = nullptr);
     virtual ~Session();
 
-    Q_INVOKABLE bool initialize(QQuickWindow* qtWindow);
+    Q_INVOKABLE bool initialize(QQuickWindow* qtWindow, QSize maximumResolution);
     Q_INVOKABLE void start();
     Q_INVOKABLE void interrupt();
     Q_PROPERTY(QStringList launchWarnings MEMBER m_LaunchWarnings NOTIFY launchWarningsChanged);
@@ -166,6 +166,12 @@ private:
     int getAudioRendererCapabilities(int audioConfiguration);
 
     void destroyMicrophoneCapture();
+
+    int getDisplayIndexForQtWindow(bool requireExactMatch);
+
+    bool getNativeDisplayMode(int displayIndex, int& width, int& height, int& fps);
+
+    void applyNativeDisplayMode(QSize maximumResolution);
 
     void getWindowDimensions(int& x, int& y,
                              int& width, int& height);

@@ -77,7 +77,12 @@ Flickable {
 
         // Highlight the first item if a gamepad is connected
         if (SdlGamepadKeyNavigation.getConnectedGamepads() > 0) {
-            resolutionComboBox.forceActiveFocus(Qt.TabFocus)
+            if (resolutionComboBox.enabled) {
+                resolutionComboBox.forceActiveFocus(Qt.TabFocus)
+            }
+            else {
+                autoNativeResCheck.forceActiveFocus(Qt.TabFocus)
+            }
         }
     }
 
@@ -127,6 +132,28 @@ Flickable {
                     text: qsTr("Setting values too high for your PC or network connection may cause lag, stuttering, or errors.")
                     font.pointSize: 9
                     wrapMode: Text.Wrap
+                }
+
+                CheckBox {
+                    id: autoNativeResCheck
+                    width: parent.width
+                    hoverEnabled: true
+                    text: qsTr("Use this display's native mode")
+                    font.pointSize: 12
+                    // The session keeps the configured mode on macOS, where the
+                    // full screen behavior depends on the resolution setting
+                    visible: Qt.platform.os !== "osx"
+                    checked: StreamingPreferences.autoNativeRes
+                    onCheckedChanged: {
+                        StreamingPreferences.autoNativeRes = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("At stream start, Moonlight uses the native resolution and refresh rate of the display its window is on, and ignores the resolution and FPS settings.") + "\n\n" +
+                                  qsTr("The configured resolution and FPS are used instead if the display mode cannot be determined, or if it is larger than the decoder supports. If only the refresh rate is outside 10-480 FPS, the native resolution is kept and the configured FPS (limited to 10-480) is used.") + "\n\n" +
+                                  qsTr("When automatic bitrate adjustment is enabled, the stream uses the default bitrate for the chosen mode. The bitrate slider keeps showing the stored value. When it is disabled, the stored bitrate is used unchanged.")
                 }
 
                 Row {
@@ -244,6 +271,7 @@ Flickable {
 
                         id: resolutionComboBox
                         maximumWidth: parent.width / 2
+                        enabled: !(autoNativeResCheck.visible && StreamingPreferences.autoNativeRes)
                         textRole: "text"
                         model: ListModel {
                             id: resolutionListModel
@@ -656,6 +684,7 @@ Flickable {
 
                         id: fpsComboBox
                         maximumWidth: parent.width / 2
+                        enabled: !(autoNativeResCheck.visible && StreamingPreferences.autoNativeRes)
                         textRole: "text"
                         // ::onActivated must be used, as it only listens for when the index is changed by a human
                         onActivated : {

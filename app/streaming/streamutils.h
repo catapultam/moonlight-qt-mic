@@ -5,6 +5,13 @@
 class StreamUtils
 {
 public:
+    // Largest display dimension we're willing to offer as a stream resolution
+    static constexpr int k_MaxSupportedDimension = 8192;
+
+    // Frame rates we're willing to ask a host for
+    static constexpr int k_MinSupportedFps = 10;
+    static constexpr int k_MaxSupportedFps = 480;
+
     static
     Uint32 getPlatformWindowFlags();
 
@@ -22,6 +29,9 @@ public:
 
     static
     int getDisplayRefreshRate(SDL_Window* window);
+
+    static
+    int normalizeRefreshRate(int refreshRate);
 
     static
     bool hasFastAes();

@@ -582,7 +582,7 @@ Session::~Session()
     SDL_DestroyMutex(m_DecoderLock);
 }
 
-bool Session::initialize(QQuickWindow* qtWindow)
+bool Session::initialize(QQuickWindow* qtWindow, QSize maximumResolution)
 {
     m_QtWindow = qtWindow;
 
@@ -638,6 +638,23 @@ bool Session::initialize(QQuickWindow* qtWindow)
     LiInitializeStreamConfiguration(&m_StreamConfig);
     m_StreamConfig.width = m_Preferences->width;
     m_StreamConfig.height = m_Preferences->height;
+    m_StreamConfig.fps = m_Preferences->fps;
+    m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
+
+    // startConnectionAsync() builds the connection request from these values,
+    // so the display must be resolved before then.
+#ifdef Q_OS_DARWIN
+    // The notch handling above keys off the configured resolution
+    Q_UNUSED(maximumResolution);
+    if (m_Preferences->useNativeDisplayMode()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Auto-native resolution is not supported on macOS. Using the configured resolution and FPS.");
+    }
+#else
+    if (m_Preferences->useNativeDisplayMode()) {
+        applyNativeDisplayMode(maximumResolution);
+    }
+#endif
 
     int x, y, width, height;
     getWindowDimensions(x, y, width, height);
@@ -665,9 +682,6 @@ bool Session::initialize(QQuickWindow* qtWindow)
 
     LiInitializeVideoCallbacks(&m_VideoCallbacks);
     m_VideoCallbacks.setup = drSetup;
-
-    m_StreamConfig.fps = m_Preferences->fps;
-    m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
 
 #ifndef STEAM_LINK
     // Opt-in to all encryption features if we detect that the platform
@@ -1314,6 +1328,281 @@ private:
     Session* m_Session;
 };
 
+int Session::getDisplayIndexForQtWindow(bool requireExactMatch)
+{
+    int displayIndex = -1;
+
+    Q_ASSERT(m_QtWindow != nullptr);
+    if (m_QtWindow == nullptr) {
+        return displayIndex;
+    }
+
+    QScreen* screen = m_QtWindow->screen();
+    if (screen == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Qt window is not associated with a QScreen!");
+        return displayIndex;
+    }
+
+    QRect displayRect = screen->geometry();
+
+    // Tripwire for the hint main() sets: SDL must report Wayland bounds in the
+    // compositor's logical space or an exact match can never succeed.
+    if (requireExactMatch &&
+            SDL_GetHintBoolean("SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY", SDL_FALSE) &&
+            QString(SDL_GetCurrentVideoDriver()) == "wayland") {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY is enabled, so SDL display bounds "
+                    "are in physical pixels and cannot match the Qt screen");
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Qt UI screen is at (%d,%d)",
+                displayRect.x(), displayRect.y());
+    for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
+        SDL_Rect displayBounds;
+
+        if (SDL_GetDisplayBounds(i, &displayBounds) == 0) {
+            if (displayBounds.x != displayRect.x() || displayBounds.y != displayRect.y()) {
+                continue;
+            }
+
+            // Picking a mode requires the right display, not just one at the same
+            // origin, so also compare sizes and reject an ambiguous match. This
+            // relies on Qt and SDL reporting bounds in the same coordinate space,
+            // which holds on Wayland. On scaled X11 or Windows, SDL reports
+            // physical pixels while Qt reports logical ones, so the match fails
+            // and the caller falls back to the Qt screen by design.
+            if (requireExactMatch) {
+                if (displayBounds.w != displayRect.width() || displayBounds.h != displayRect.height()) {
+                    continue;
+                }
+
+                if (displayIndex >= 0) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "SDL displays %d and %d both match the Qt screen",
+                                displayIndex, i);
+                    return -1;
+                }
+
+                // Report the match only once the scan rules out a second one
+                displayIndex = i;
+                continue;
+            }
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "SDL found matching display %d",
+                        i);
+            return i;
+        }
+        else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "SDL_GetDisplayBounds(%d) failed: %s",
+                        i, SDL_GetError());
+        }
+    }
+
+    if (requireExactMatch) {
+        if (displayIndex >= 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "SDL found matching display %d",
+                        displayIndex);
+        }
+        else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "No SDL display matches the Qt screen");
+        }
+    }
+
+    return displayIndex;
+}
+
+static bool isNativeModeOfAnyDisplay(int width, int height)
+{
+    for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
+        SDL_DisplayMode mode;
+        SDL_Rect safeArea;
+
+        if (StreamUtils::getNativeDesktopMode(i, &mode, &safeArea) &&
+                mode.w == width && mode.h == height) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool Session::getNativeDisplayMode(int displayIndex, int& width, int& height, int& fps)
+{
+    // getNativeDesktopMode() is the platform-aware way to ask for a display's
+    // current mode in physical pixels, and it's what the settings UI and
+    // updateOptimalWindowDisplayMode() use. SDL's desktop mode is unusable here
+    // because the Wayland backend reports it in compositor-logical units, which
+    // are smaller than the panel under fractional scaling. On Wayland the helper
+    // reads mode 0 instead: SDL builds the mode list from the single current mode
+    // the compositor advertises, adding the native mode plus emulated modes that
+    // are all strictly smaller, and sorts it by descending size, so mode 0 is the
+    // current mode in physical pixels. That assumes the compositor offers
+    // wp_viewporter (mutter does), since without it at a scale other than 1.0 SDL
+    // adds only scaled desktop modes. X11 with DPI scaling has no such fixup,
+    // which is a known limitation of this Wayland-first fork.
+    if (displayIndex >= 0) {
+        SDL_DisplayMode mode;
+        SDL_Rect safeArea;
+
+        if (!StreamUtils::getNativeDesktopMode(displayIndex, &mode, &safeArea)) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Unable to read the native mode of SDL display %d",
+                        displayIndex);
+        }
+        else if (mode.w <= 0 || mode.h <= 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "SDL display %d reported an unusable native mode: %dx%d",
+                        displayIndex, mode.w, mode.h);
+        }
+        else {
+            if (mode.refresh_rate <= 0) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Refresh rate unknown; assuming 60 Hz");
+                mode.refresh_rate = 60;
+            }
+
+            width = mode.w;
+            height = mode.h;
+            fps = StreamUtils::normalizeRefreshRate(mode.refresh_rate);
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Detected display mode %dx%dx%d from the native mode of SDL display %d",
+                        width, height, fps, displayIndex);
+            return true;
+        }
+    }
+
+    // We land here when the Qt screen couldn't be tied to a single SDL display:
+    // scaled X11 or Windows where the two use different coordinate spaces,
+    // mirrored outputs that share a rectangle, or SDL_GetDisplayBounds() failing.
+    QScreen* screen = m_QtWindow != nullptr ? m_QtWindow->screen() : nullptr;
+    if (screen == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "No QScreen is available to determine the display mode");
+        return false;
+    }
+
+    // Qt reports geometry in logical pixels, so scale it back up to physical pixels.
+    width = qRound(screen->geometry().width() * screen->devicePixelRatio());
+    height = qRound(screen->geometry().height() * screen->devicePixelRatio());
+
+    // An unusable refresh rate is left for the caller's range check to replace
+    if (screen->refreshRate() > 0) {
+        fps = StreamUtils::normalizeRefreshRate(qRound(screen->refreshRate()));
+    }
+    else {
+        fps = 0;
+    }
+
+    if (width <= 0 || height <= 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Qt reported an unusable screen size: %dx%d",
+                    width, height);
+        return false;
+    }
+
+    // This only recovers physical pixels if Qt knows the true device pixel ratio,
+    // which is not the case for an integral ratio on a fractionally scaled display.
+    // A correct result is always some display's native mode: the displays we
+    // couldn't tell apart are still in SDL's list, and SDL reports native modes in
+    // physical pixels on every platform we get here on. So a size that matches no
+    // display is wrong, not merely unrecognized, and streaming it would ignore the
+    // panel we're actually on.
+    if (!isNativeModeOfAnyDisplay(width, height)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Qt screen size %dx%d is not the native mode of any display. "
+                    "It is likely a logical size rather than physical pixels.",
+                    width, height);
+        return false;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Detected display mode %dx%dx%d from the Qt screen (fallback)",
+                width, height, fps);
+    return true;
+}
+
+void Session::applyNativeDisplayMode(QSize maximumResolution)
+{
+    int width, height, fps;
+
+    if (!getNativeDisplayMode(getDisplayIndexForQtWindow(true), width, height, fps)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to determine the display mode. Using the configured resolution and FPS.");
+        return;
+    }
+
+    if (width > StreamUtils::k_MaxSupportedDimension || height > StreamUtils::k_MaxSupportedDimension) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Display mode %dx%d is too large to stream. Using the configured resolution and FPS.",
+                    width, height);
+        return;
+    }
+
+    // Encoders and decoders work in pairs of pixels
+    width &= ~0x1;
+    height &= ~0x1;
+
+    if (width < 2 || height < 2) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Display mode %dx%d is too small to stream. Using the configured resolution and FPS.",
+                    width, height);
+        return;
+    }
+
+    // The settings UI prunes its resolution list by total pixels, so cap this
+    // path the same way. A mode that exceeds the decoder's width or height but
+    // not its pixel count is accepted here, as it is there, which a portrait
+    // display can do. An unset or invalid limit means the probe didn't run or
+    // failed, and nothing is capped.
+    if (!maximumResolution.isEmpty() &&
+            (qint64)width * height > (qint64)maximumResolution.width() * maximumResolution.height()) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Display mode %dx%d exceeds the decoder's maximum resolution of %dx%d. "
+                    "Using the configured resolution and FPS.",
+                    width, height, maximumResolution.width(), maximumResolution.height());
+        return;
+    }
+
+    if (fps < StreamUtils::k_MinSupportedFps || fps > StreamUtils::k_MaxSupportedFps) {
+        // The configured value can be out of range too
+        int configuredFps = qBound(StreamUtils::k_MinSupportedFps,
+                                   m_Preferences->fps,
+                                   StreamUtils::k_MaxSupportedFps);
+
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Refresh rate of %d Hz is outside the supported range. Using %d FPS.",
+                    fps, configuredFps);
+        fps = configuredFps;
+    }
+
+    m_StreamConfig.width = width;
+    m_StreamConfig.height = height;
+
+    // An explicit --fps on the command line pins the frame rate
+    if (!m_Preferences->fpsOverridden) {
+        m_StreamConfig.fps = fps;
+    }
+
+    if (m_Preferences->autoAdjustBitrate && !m_Preferences->bitrateOverridden) {
+        m_StreamConfig.bitrate = StreamingPreferences::getDefaultBitrate(m_StreamConfig.width,
+                                                                         m_StreamConfig.height,
+                                                                         m_StreamConfig.fps,
+                                                                         m_Preferences->enableYUV444);
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Using display mode %dx%dx%d at %d kbps",
+                m_StreamConfig.width, m_StreamConfig.height,
+                m_StreamConfig.fps, m_StreamConfig.bitrate);
+}
+
 void Session::getWindowDimensions(int& x, int& y,
                                   int& width, int& height)
 {
@@ -1326,40 +1615,7 @@ void Session::getWindowDimensions(int& x, int& y,
     // Create our window on the same display that Qt's UI
     // was being displayed on.
     else {
-        Q_ASSERT(m_QtWindow != nullptr);
-        if (m_QtWindow != nullptr) {
-            QScreen* screen = m_QtWindow->screen();
-            if (screen != nullptr) {
-                QRect displayRect = screen->geometry();
-
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "Qt UI screen is at (%d,%d)",
-                            displayRect.x(), displayRect.y());
-                for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
-                    SDL_Rect displayBounds;
-
-                    if (SDL_GetDisplayBounds(i, &displayBounds) == 0) {
-                        if (displayBounds.x == displayRect.x() &&
-                            displayBounds.y == displayRect.y()) {
-                            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                        "SDL found matching display %d",
-                                        i);
-                            displayIndex = i;
-                            break;
-                        }
-                    }
-                    else {
-                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                    "SDL_GetDisplayBounds(%d) failed: %s",
-                                    i, SDL_GetError());
-                    }
-                }
-            }
-            else {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "Qt window is not associated with a QScreen!");
-            }
-        }
+        displayIndex = qMax(getDisplayIndexForQtWindow(false), 0);
     }
 
     SDL_Rect usableBounds;

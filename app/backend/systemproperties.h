@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QMutex>
 #include <QRect>
 
 #include "SDL_compat.h"
@@ -12,6 +13,14 @@ class SystemProperties : public QObject
     friend class SystemPropertyQueryThread;
 
 public:
+    struct DecoderProperties
+    {
+        bool hasHardwareAcceleration;
+        bool rendererAlwaysFullScreen;
+        bool supportsHdr;
+        QSize maximumResolution;
+    };
+
     SystemProperties();
     ~SystemProperties();
 
@@ -50,11 +59,18 @@ signals:
     void supportsHdrChanged();
 
 private slots:
-    void updateDecoderProperties(bool hasHardwareAcceleration, bool rendererAlwaysFullScreen, QSize maximumResolution, bool supportsHdr);
+    void applyDecoderProperties();
 
 private:
+    void updateDecoderProperties(bool hasHardwareAcceleration, bool rendererAlwaysFullScreen, QSize maximumResolution, bool supportsHdr);
+
     QThread* systemPropertyQueryThread = nullptr;
     SDL_Window* testWindow = nullptr;
+
+    // Written by the query thread, applied on the main thread
+    QMutex pendingDecoderPropertiesLock;
+    bool hasPendingDecoderProperties = false;
+    DecoderProperties pendingDecoderProperties = {};
 
     // Properties set by the constructor
     bool isRunningWayland;

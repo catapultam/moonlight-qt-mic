@@ -161,6 +161,21 @@ int StreamUtils::getDisplayRefreshRate(SDL_Window* window)
     return mode.refresh_rate;
 }
 
+int StreamUtils::normalizeRefreshRate(int refreshRate)
+{
+    // Try to normalize values around our standard refresh rates.
+    // Some displays/OSes report values that are slightly off.
+    if (refreshRate >= 58 && refreshRate <= 62) {
+        return 60;
+    }
+    else if (refreshRate >= 28 && refreshRate <= 32) {
+        return 30;
+    }
+    else {
+        return refreshRate;
+    }
+}
+
 bool StreamUtils::hasFastAes()
 {
 #ifndef __has_builtin

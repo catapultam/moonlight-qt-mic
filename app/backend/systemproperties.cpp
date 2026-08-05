@@ -24,20 +24,24 @@ public:
 private:
     void run() override
     {
-        bool hasHardwareAcceleration;
-        bool rendererAlwaysFullScreen;
-        bool supportsHdr;
-        QSize maximumResolution;
+        SystemProperties::DecoderProperties properties = {};
 
-        Session::getDecoderInfo(m_Properties->testWindow, hasHardwareAcceleration, rendererAlwaysFullScreen, supportsHdr, maximumResolution);
+        Session::getDecoderInfo(m_Properties->testWindow,
+                                properties.hasHardwareAcceleration,
+                                properties.rendererAlwaysFullScreen,
+                                properties.supportsHdr,
+                                properties.maximumResolution);
+
+        // Publish the results before this thread exits so waitForAsyncLoad() callers
+        // can apply them without waiting for the queued call below to be delivered.
+        {
+            QMutexLocker locker(&m_Properties->pendingDecoderPropertiesLock);
+            m_Properties->pendingDecoderProperties = properties;
+            m_Properties->hasPendingDecoderProperties = true;
+        }
 
         // Propagate the decoder properties to the SystemProperties singleton and emit any change signals on the main thread
-        QMetaObject::invokeMethod(m_Properties, "updateDecoderProperties",
-                                  Qt::QueuedConnection,
-                                  Q_ARG(bool, hasHardwareAcceleration),
-                                  Q_ARG(bool, rendererAlwaysFullScreen),
-                                  Q_ARG(QSize, maximumResolution),
-                                  Q_ARG(bool, supportsHdr));
+        QMetaObject::invokeMethod(m_Properties, "applyDecoderProperties", Qt::QueuedConnection);
     }
 
 private:
@@ -106,7 +110,44 @@ SystemProperties::SystemProperties()
 
 SystemProperties::~SystemProperties()
 {
-    waitForAsyncLoad();
+    if (systemPropertyQueryThread) {
+        systemPropertyQueryThread->wait();
+    }
+
+    // Publishing results now would emit property changes into a QML engine that
+    // may already be gone, so just release what the query thread was using.
+    {
+        QMutexLocker locker(&pendingDecoderPropertiesLock);
+        hasPendingDecoderProperties = false;
+    }
+
+    if (testWindow) {
+        SDL_DestroyWindow(testWindow);
+        testWindow = nullptr;
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    }
+}
+
+void SystemProperties::applyDecoderProperties()
+{
+    DecoderProperties properties = {};
+
+    {
+        QMutexLocker locker(&pendingDecoderPropertiesLock);
+
+        // Only the first caller applies the results
+        if (!hasPendingDecoderProperties) {
+            return;
+        }
+
+        hasPendingDecoderProperties = false;
+        properties = pendingDecoderProperties;
+    }
+
+    updateDecoderProperties(properties.hasHardwareAcceleration,
+                            properties.rendererAlwaysFullScreen,
+                            properties.maximumResolution,
+                            properties.supportsHdr);
 }
 
 void SystemProperties::updateDecoderProperties(bool hasHardwareAcceleration, bool rendererAlwaysFullScreen, QSize maximumResolution, bool supportsHdr)
@@ -212,6 +253,11 @@ void SystemProperties::waitForAsyncLoad()
 {
     if (systemPropertyQueryThread) {
         systemPropertyQueryThread->wait();
+
+        // The queued call from the worker may not have been delivered yet, so
+        // apply the results now for callers that read the properties right after
+        // this returns.
+        applyDecoderProperties();
     }
 }
 
@@ -225,47 +271,55 @@ void SystemProperties::refreshDisplays()
     }
 
     monitorNativeResolutions.clear();
+    monitorSafeAreaResolutions.clear();
+    monitorRefreshRates.clear();
 
-    SDL_DisplayMode bestMode;
     for (int displayIndex = 0; displayIndex < SDL_GetNumVideoDisplays(); displayIndex++) {
         SDL_DisplayMode desktopMode;
         SDL_Rect safeArea;
+        QRect nativeResolution;
+        QRect safeAreaResolution;
+        int refreshRate = 0;
 
         if (StreamUtils::getNativeDesktopMode(displayIndex, &desktopMode, &safeArea)) {
-            if (desktopMode.w <= 8192 && desktopMode.h <= 8192) {
-                monitorNativeResolutions.insert(displayIndex, QRect(0, 0, desktopMode.w, desktopMode.h));
-                monitorSafeAreaResolutions.insert(displayIndex, QRect(0, 0, safeArea.w, safeArea.h));
-            }
-            else {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "Skipping resolution over 8K: %dx%d",
-                            desktopMode.w, desktopMode.h);
-            }
+            if (desktopMode.w <= StreamUtils::k_MaxSupportedDimension &&
+                desktopMode.h <= StreamUtils::k_MaxSupportedDimension) {
+                SDL_DisplayMode bestMode;
 
-            // Start at desktop mode and work our way up
-            bestMode = desktopMode;
-            for (int i = 0; i < SDL_GetNumDisplayModes(displayIndex); i++) {
-                SDL_DisplayMode mode;
-                if (SDL_GetDisplayMode(displayIndex, i, &mode) == 0) {
-                    if (mode.w == desktopMode.w && mode.h == desktopMode.h) {
-                        if (mode.refresh_rate > bestMode.refresh_rate) {
-                            bestMode = mode;
+                nativeResolution = QRect(0, 0, desktopMode.w, desktopMode.h);
+                safeAreaResolution = QRect(0, 0, safeArea.w, safeArea.h);
+
+                // Start at desktop mode and work our way up
+                bestMode = desktopMode;
+                for (int i = 0; i < SDL_GetNumDisplayModes(displayIndex); i++) {
+                    SDL_DisplayMode mode;
+                    if (SDL_GetDisplayMode(displayIndex, i, &mode) == 0) {
+                        if (mode.w == desktopMode.w && mode.h == desktopMode.h) {
+                            if (mode.refresh_rate > bestMode.refresh_rate) {
+                                bestMode = mode;
+                            }
                         }
                     }
                 }
-            }
 
-            // Try to normalize values around our our standard refresh rates.
-            // Some displays/OSes report values that are slightly off.
-            if (bestMode.refresh_rate >= 58 && bestMode.refresh_rate <= 62) {
-                monitorRefreshRates.append(60);
-            }
-            else if (bestMode.refresh_rate >= 28 && bestMode.refresh_rate <= 32) {
-                monitorRefreshRates.append(30);
+                refreshRate = StreamUtils::normalizeRefreshRate(bestMode.refresh_rate);
             }
             else {
-                monitorRefreshRates.append(bestMode.refresh_rate);
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Skipping resolution over %d pixels per dimension: %dx%d",
+                            StreamUtils::k_MaxSupportedDimension,
+                            desktopMode.w, desktopMode.h);
             }
+        }
+
+        // The lists hold one entry per usable display in enumeration order, which
+        // is not the SDL display index. Consumers only walk them from the start
+        // until the entries run out, and appending in lockstep keeps a display's
+        // resolution, safe area and refresh rate at the same index.
+        if (!nativeResolution.isEmpty()) {
+            monitorNativeResolutions.append(nativeResolution);
+            monitorSafeAreaResolutions.append(safeAreaResolution);
+            monitorRefreshRates.append(refreshRate);
         }
     }
 

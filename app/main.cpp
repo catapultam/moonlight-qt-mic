@@ -719,6 +719,22 @@ int main(int argc, char *argv[])
     // the mouse cursor.
     SDL_SetHint(SDL_HINT_VIDEO_WAYLAND_EMULATE_MOUSE_WARP, "0");
 
+    // Keep SDL's Wayland coordinates in the compositor's logical space, so display
+    // bounds stay comparable with Qt's screen geometry and display modes stay in
+    // physical pixels. sdl2-compat already forces this through the environment,
+    // but only for executables named exactly "moonlight" or "moonlight-qt". Ours
+    // is "moonlight" today, so an installed rename would silently lose it, which
+    // is why we ask for it ourselves. A value already in the environment outranks
+    // this call, deliberately: a user setting it explicitly should still win. The
+    // hint doesn't exist in SDL2 proper, which ignores unknown hint names.
+    //
+    // This call must stay after SDL_InitSubSystem(SDL_INIT_TIMER) above. That is
+    // what makes sdl2-compat install its own default of "1" at the same priority,
+    // and at equal priority the later write wins. Moving this earlier loses the
+    // race silently: SDL reverts to physical pixel bounds and the display match in
+    // Session::getDisplayIndexForQtWindow() stops matching on scaled Wayland.
+    SDL_SetHint("SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY", "0");
+
 #ifdef QT_DEBUG
     // Allow thread naming using exceptions on debug builds. SDL doesn't use SEH
     // when throwing the exceptions, so we don't enable it for release builds out
