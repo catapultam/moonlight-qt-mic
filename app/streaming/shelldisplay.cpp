@@ -68,14 +68,19 @@ WindowMonitor getWindowMonitor(const QString& windowTitle, const QString& appId)
 {
     WindowMonitor result;
 
-    if (!callShell("GetWindowMonitor", windowTitle, result)) {
-        return result;
+    // Ask by application id first. It identifies our windows and nothing else,
+    // while a title is matched as a substring, so any window that happens to
+    // mention ours answers instead: a terminal running a command that names the
+    // stream window was observed doing exactly that. Both lookups prefer the
+    // focused window, which during a stream is the stream window.
+    if (!appId.isEmpty()) {
+        if (!callShell("GetWindowMonitorByAppId", appId, result)) {
+            return result;
+        }
     }
 
-    // The title lookup is the precise one. The application id matches any window
-    // of ours, so only use it when the shell does not know the title.
-    if (!result.found && !appId.isEmpty()) {
-        if (!callShell("GetWindowMonitorByAppId", appId, result)) {
+    if (!result.found && !windowTitle.isEmpty()) {
+        if (!callShell("GetWindowMonitor", windowTitle, result)) {
             return result;
         }
     }
