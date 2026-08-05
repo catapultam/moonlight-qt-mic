@@ -4,6 +4,10 @@
 #include "backend/richpresencemanager.h"
 #include "streaming/audio/capture/microphonecapture.h"
 
+#ifdef HAVE_SHELL_DISPLAY
+#include "streaming/shelldisplay.h"
+#endif
+
 #include <Limelight.h>
 #include "SDL_compat.h"
 #include "utils.h"
@@ -1395,59 +1399,34 @@ private:
     Session* m_Session;
 };
 
-int Session::getDisplayIndexForQtWindow(bool requireExactMatch)
+// Finds the SDL display that covers the given rect. Callers get the display an
+// outside source named, whether that source is Qt or the compositor.
+static int getDisplayIndexForRect(const SDL_Rect& displayRect, bool requireExactMatch)
 {
     int displayIndex = -1;
 
-    Q_ASSERT(m_QtWindow != nullptr);
-    if (m_QtWindow == nullptr) {
-        return displayIndex;
-    }
-
-    QScreen* screen = m_QtWindow->screen();
-    if (screen == nullptr) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Qt window is not associated with a QScreen!");
-        return displayIndex;
-    }
-
-    QRect displayRect = screen->geometry();
-
-    // Tripwire for the hint main() sets: SDL must report Wayland bounds in the
-    // compositor's logical space or an exact match can never succeed.
-    if (requireExactMatch &&
-            SDL_GetHintBoolean("SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY", SDL_FALSE) &&
-            QString(SDL_GetCurrentVideoDriver()) == "wayland") {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY is enabled, so SDL display bounds "
-                    "are in physical pixels and cannot match the Qt screen");
-    }
-
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Qt UI screen is at (%d,%d)",
-                displayRect.x(), displayRect.y());
     for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
         SDL_Rect displayBounds;
 
         if (SDL_GetDisplayBounds(i, &displayBounds) == 0) {
-            if (displayBounds.x != displayRect.x() || displayBounds.y != displayRect.y()) {
+            if (displayBounds.x != displayRect.x || displayBounds.y != displayRect.y) {
                 continue;
             }
 
             // Picking a mode requires the right display, not just one at the same
             // origin, so also compare sizes and reject an ambiguous match. This
-            // relies on Qt and SDL reporting bounds in the same coordinate space,
-            // which holds on Wayland. On scaled X11 or Windows, SDL reports
-            // physical pixels while Qt reports logical ones, so the match fails
-            // and the caller falls back to the Qt screen by design.
+            // relies on the caller's rect and SDL bounds being in the same
+            // coordinate space, which holds on Wayland. On scaled X11 or Windows,
+            // SDL reports physical pixels while Qt reports logical ones, so the
+            // match fails and the caller falls back by design.
             if (requireExactMatch) {
-                if (displayBounds.w != displayRect.width() || displayBounds.h != displayRect.height()) {
+                if (displayBounds.w != displayRect.w || displayBounds.h != displayRect.h) {
                     continue;
                 }
 
                 if (displayIndex >= 0) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                                "SDL displays %d and %d both match the Qt screen",
+                                "SDL displays %d and %d both match the same rect",
                                 displayIndex, i);
                     return -1;
                 }
@@ -1469,16 +1448,51 @@ int Session::getDisplayIndexForQtWindow(bool requireExactMatch)
         }
     }
 
-    if (requireExactMatch) {
-        if (displayIndex >= 0) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "SDL found matching display %d",
-                        displayIndex);
-        }
-        else {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "No SDL display matches the Qt screen");
-        }
+    if (requireExactMatch && displayIndex >= 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL found matching display %d",
+                    displayIndex);
+    }
+
+    return displayIndex;
+}
+
+int Session::getDisplayIndexForQtWindow(bool requireExactMatch)
+{
+    Q_ASSERT(m_QtWindow != nullptr);
+    if (m_QtWindow == nullptr) {
+        return -1;
+    }
+
+    QScreen* screen = m_QtWindow->screen();
+    if (screen == nullptr) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Qt window is not associated with a QScreen!");
+        return -1;
+    }
+
+    QRect screenRect = screen->geometry();
+
+    // Tripwire for the hint main() sets: SDL must report Wayland bounds in the
+    // compositor's logical space or an exact match can never succeed.
+    if (requireExactMatch &&
+            SDL_GetHintBoolean("SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY", SDL_FALSE) &&
+            QString(SDL_GetCurrentVideoDriver()) == "wayland") {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY is enabled, so SDL display bounds "
+                    "are in physical pixels and cannot match the Qt screen");
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Qt UI screen is at (%d,%d)",
+                screenRect.x(), screenRect.y());
+
+    SDL_Rect displayRect = { screenRect.x(), screenRect.y(), screenRect.width(), screenRect.height() };
+    int displayIndex = getDisplayIndexForRect(displayRect, requireExactMatch);
+
+    if (requireExactMatch && displayIndex < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "No SDL display matches the Qt screen");
     }
 
     return displayIndex;
@@ -1821,42 +1835,78 @@ bool Session::pollDisplayFollowRestart()
         return false;
     }
 
-    // SDL_GetWindowDisplayIndex() is the only display signal there is. On Wayland
-    // the compositor never tells SDL where a window is (SDL_SetWindowPosition fails
-    // with "wayland cannot position non-popup windows"), so picking the display
-    // with the largest overlap would be computed from a position SDL invented.
-    // SDL's answer comes from the compositor's own surface-enter events instead,
-    // which is authoritative but transient: a tiling window manager that retiles a
-    // window reports it on another display for a moment even though it never left
-    // the one it is on. So require the window to report the same display at both
-    // ends of the debounce, and give it another settle window if it does not.
-    int currentDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
-    if (currentDisplayIndex < 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SDL_GetWindowDisplayIndex() failed: %s",
-                    SDL_GetError());
-        return false;
-    }
+    int currentDisplayIndex = -1;
+    QString decisionDetail;
 
-    if (currentDisplayIndex != m_DisplayFollowArmedDisplayIndex) {
-        if (m_DisplayFollowRearmCount >= DISPLAY_FOLLOW_MAX_REARM) {
+#ifdef HAVE_SHELL_DISPLAY
+    // The compositor is the only authoritative source. Ask GNOME Shell first: it
+    // knows which monitor the window is actually on, so a tiling window manager
+    // that scrolls the window across an output boundary does not read as a move.
+    // SDL_GetWindowTitle() is the title the shell sees, taken from the window
+    // itself so the two can never drift apart.
+    ShellDisplay::WindowMonitor monitor =
+            ShellDisplay::getWindowMonitor(QString::fromUtf8(SDL_GetWindowTitle(m_Window)),
+                                           QGuiApplication::desktopFileName());
+    if (monitor.found) {
+        int shellDisplayIndex = getDisplayIndexForRect(monitor.rect, true);
+        QString rectDetail = QStringLiteral("monitor %1 at (%2,%3) %4x%5")
+                .arg(monitor.monitorIndex).arg(monitor.rect.x).arg(monitor.rect.y)
+                .arg(monitor.rect.w).arg(monitor.rect.h);
+
+        if (shellDisplayIndex >= 0) {
+            currentDisplayIndex = shellDisplayIndex;
+            decisionDetail = QStringLiteral("dbus: ") + rectDetail;
+        }
+        else {
+            decisionDetail = QStringLiteral("sdl-fallback: no SDL display matches ") + rectDetail;
+        }
+    }
+    else {
+        decisionDetail = QStringLiteral("sdl-fallback: ") + monitor.unavailableReason;
+    }
+#else
+    decisionDetail = QStringLiteral("sdl-fallback: built without the compositor query");
+#endif
+
+    if (currentDisplayIndex < 0) {
+        // Without the compositor, SDL_GetWindowDisplayIndex() is the only display
+        // signal there is. On Wayland the compositor never tells SDL where a window
+        // is (SDL_SetWindowPosition fails with "wayland cannot position non-popup
+        // windows"), so picking the display with the largest overlap would be
+        // computed from a position SDL invented. SDL's answer comes from the
+        // compositor's own surface-enter events instead, which is authoritative but
+        // transient: a tiling window manager that retiles a window reports it on
+        // another display for a moment even though it never left the one it is on.
+        // So require the window to report the same display at both ends of the
+        // debounce, and give it another settle window if it does not.
+        currentDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
+        if (currentDisplayIndex < 0) {
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "The stream window reported a different display at %d checks in a row; "
-                        "not following it until it changes again",
-                        m_DisplayFollowRearmCount + 1);
+                        "SDL_GetWindowDisplayIndex() failed: %s",
+                        SDL_GetError());
             return false;
         }
 
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "The stream window reports SDL display %d now and %d when the check was armed; "
-                    "waiting another %d ms",
-                    currentDisplayIndex, m_DisplayFollowArmedDisplayIndex, DISPLAY_FOLLOW_DEBOUNCE_MS);
+        if (currentDisplayIndex != m_DisplayFollowArmedDisplayIndex) {
+            if (m_DisplayFollowRearmCount >= DISPLAY_FOLLOW_MAX_REARM) {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "The stream window reported a different display at %d checks in a row; "
+                            "not following it until it changes again",
+                            m_DisplayFollowRearmCount + 1);
+                return false;
+            }
 
-        m_DisplayFollowRearmCount++;
-        m_DisplayFollowArmedDisplayIndex = currentDisplayIndex;
-        m_DisplayFollowArmed = true;
-        m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
-        return false;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "The stream window reports SDL display %d now and %d when the check was armed; "
+                        "waiting another %d ms",
+                        currentDisplayIndex, m_DisplayFollowArmedDisplayIndex, DISPLAY_FOLLOW_DEBOUNCE_MS);
+
+            m_DisplayFollowRearmCount++;
+            m_DisplayFollowArmedDisplayIndex = currentDisplayIndex;
+            m_DisplayFollowArmed = true;
+            m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
+            return false;
+        }
     }
 
     // A window that is still on the display this session streams for has nothing to
@@ -1864,9 +1914,16 @@ bool Session::pollDisplayFollowRestart()
     // the same display reconfigured to another mode is a change worth following,
     // and indexes are renumbered when monitors come and go.
     SDL_Rect currentBounds;
-    if (m_HasStreamDisplayBounds &&
-            SDL_GetDisplayBounds(currentDisplayIndex, &currentBounds) == 0 &&
-            SDL_RectEquals(&currentBounds, &m_StreamDisplayBounds)) {
+    bool treatAsMove = !(m_HasStreamDisplayBounds &&
+                         SDL_GetDisplayBounds(currentDisplayIndex, &currentBounds) == 0 &&
+                         SDL_RectEquals(&currentBounds, &m_StreamDisplayBounds));
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Display follow (%s) -> SDL display %d; %s",
+                qPrintable(decisionDetail), currentDisplayIndex,
+                treatAsMove ? "treating this as a move" : "the stream is already on it");
+
+    if (!treatAsMove) {
         return false;
     }
 

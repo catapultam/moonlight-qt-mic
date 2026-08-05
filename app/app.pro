@@ -438,6 +438,14 @@ wayland {
     SOURCES += streaming/video/ffmpeg-renderers/pacer/waylandvsyncsource.cpp
     HEADERS += streaming/video/ffmpeg-renderers/pacer/waylandvsyncsource.h
 }
+unix:!macx {
+    message(GNOME Shell display query enabled)
+
+    QT += dbus
+    DEFINES += HAVE_SHELL_DISPLAY
+    SOURCES += streaming/shelldisplay.cpp
+    HEADERS += streaming/shelldisplay.h
+}
 
 RESOURCES += \
     resources.qrc \
