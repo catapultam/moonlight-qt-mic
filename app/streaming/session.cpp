@@ -64,6 +64,11 @@
 #define DISPLAY_FOLLOW_CHAIN_RESET_MS 60000
 #define DISPLAY_FOLLOW_MAX_CHAIN 6
 
+// How many extra settle windows the window may have when it reports a different
+// display at the two ends of the debounce. A window that never settles is not one
+// we can follow, so the wait is capped.
+#define DISPLAY_FOLLOW_MAX_REARM 3
+
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clStageStarting,
     nullptr,
@@ -590,14 +595,26 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_PendingFps(0),
       m_HasPendingDisplayBounds(false),
       m_PendingDisplayBounds{},
+      m_HasPendingWindowState(false),
+      m_PendingWindowWidth(0),
+      m_PendingWindowHeight(0),
+      m_PendingWindowFlags(0),
       m_RestartPending(false),
       m_RestartWidth(0),
       m_RestartHeight(0),
       m_RestartFps(0),
       m_HasRestartDisplayBounds(false),
       m_RestartDisplayBounds{},
+      m_HasRestartWindowState(false),
+      m_RestartWindowWidth(0),
+      m_RestartWindowHeight(0),
+      m_RestartWindowFlags(0),
       m_DisplayFollowArmed(false),
       m_DisplayFollowDeadline(0),
+      m_HasStreamDisplayBounds(false),
+      m_StreamDisplayBounds{},
+      m_DisplayFollowArmedDisplayIndex(-1),
+      m_DisplayFollowRearmCount(0),
       m_HostDisplayWidth(0),
       m_HostDisplayHeight(0),
       m_HostDisplayFps(0),
@@ -1718,25 +1735,22 @@ void Session::armDisplayFollowRestart()
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Display change detected; checking for a new native mode in %d ms",
                     DISPLAY_FOLLOW_DEBOUNCE_MS);
+
+        // Where the window is when the burst starts. The poll requires the same
+        // answer when the debounce expires before it believes the window moved.
+        m_DisplayFollowArmedDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
+        m_DisplayFollowRearmCount = 0;
     }
 
     m_DisplayFollowArmed = true;
     m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
 }
 
-// Reads the native mode of the display the stream window is on, adjusted to a mode
-// we can stream. SDL knows which display the stream window is on, so no Qt screen
-// matching is needed here.
-bool Session::getStreamWindowNativeMode(int& displayIndex, int& width, int& height, int& fps)
+// Reads the native mode of the given display, adjusted to a mode we can stream.
+// The caller resolves the display, so that every check in one poll works from the
+// same reading of where the stream window is.
+bool Session::getStreamWindowNativeMode(int displayIndex, int& width, int& height, int& fps)
 {
-    displayIndex = SDL_GetWindowDisplayIndex(m_Window);
-    if (displayIndex < 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SDL_GetWindowDisplayIndex() failed: %s",
-                    SDL_GetError());
-        return false;
-    }
-
     SDL_DisplayMode mode;
     SDL_Rect safeArea;
     if (!StreamUtils::getNativeDesktopMode(displayIndex, &mode, &safeArea)) {
@@ -1807,16 +1821,69 @@ bool Session::pollDisplayFollowRestart()
         return false;
     }
 
+    // SDL_GetWindowDisplayIndex() is the only display signal there is. On Wayland
+    // the compositor never tells SDL where a window is (SDL_SetWindowPosition fails
+    // with "wayland cannot position non-popup windows"), so picking the display
+    // with the largest overlap would be computed from a position SDL invented.
+    // SDL's answer comes from the compositor's own surface-enter events instead,
+    // which is authoritative but transient: a tiling window manager that retiles a
+    // window reports it on another display for a moment even though it never left
+    // the one it is on. So require the window to report the same display at both
+    // ends of the debounce, and give it another settle window if it does not.
+    int currentDisplayIndex = SDL_GetWindowDisplayIndex(m_Window);
+    if (currentDisplayIndex < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_GetWindowDisplayIndex() failed: %s",
+                    SDL_GetError());
+        return false;
+    }
+
+    if (currentDisplayIndex != m_DisplayFollowArmedDisplayIndex) {
+        if (m_DisplayFollowRearmCount >= DISPLAY_FOLLOW_MAX_REARM) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "The stream window reported a different display at %d checks in a row; "
+                        "not following it until it changes again",
+                        m_DisplayFollowRearmCount + 1);
+            return false;
+        }
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "The stream window reports SDL display %d now and %d when the check was armed; "
+                    "waiting another %d ms",
+                    currentDisplayIndex, m_DisplayFollowArmedDisplayIndex, DISPLAY_FOLLOW_DEBOUNCE_MS);
+
+        m_DisplayFollowRearmCount++;
+        m_DisplayFollowArmedDisplayIndex = currentDisplayIndex;
+        m_DisplayFollowArmed = true;
+        m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
+        return false;
+    }
+
+    // A window that is still on the display this session streams for has nothing to
+    // follow, whatever the window manager did to its size. Bounds, not the index:
+    // the same display reconfigured to another mode is a change worth following,
+    // and indexes are renumbered when monitors come and go.
+    SDL_Rect currentBounds;
+    if (m_HasStreamDisplayBounds &&
+            SDL_GetDisplayBounds(currentDisplayIndex, &currentBounds) == 0 &&
+            SDL_RectEquals(&currentBounds, &m_StreamDisplayBounds)) {
+        return false;
+    }
+
     // A host that runs commands can move its own display while the stream keeps
     // running, so the session never ends for a display change. The rails below
     // limit how often a session may end, so they do not apply here; the debounce
     // above and the last-requested-mode check in the command limit how often a
     // command runs.
     if (m_Preferences->hostDisplaySync) {
-        int displayIndex, width, height, fps;
+        int width, height, fps;
 
-        if (getStreamWindowNativeMode(displayIndex, width, height, fps)) {
+        if (getStreamWindowNativeMode(currentDisplayIndex, width, height, fps)) {
             sendHostDisplayCommand(width, height, fps);
+
+            // The stream now follows this display, so a later move back to the old
+            // one is a change again
+            m_HasStreamDisplayBounds = SDL_GetDisplayBounds(currentDisplayIndex, &m_StreamDisplayBounds) == 0;
         }
 
         return false;
@@ -1846,8 +1913,8 @@ bool Session::pollDisplayFollowRestart()
         return false;
     }
 
-    int displayIndex, width, height, fps;
-    if (!getStreamWindowNativeMode(displayIndex, width, height, fps)) {
+    int width, height, fps;
+    if (!getStreamWindowNativeMode(currentDisplayIndex, width, height, fps)) {
         return false;
     }
 
@@ -1856,12 +1923,16 @@ bool Session::pollDisplayFollowRestart()
     int targetFps = m_Preferences->fpsOverridden ? m_StreamConfig.fps : fps;
 
     if (width == m_StreamConfig.width && height == m_StreamConfig.height && targetFps == m_StreamConfig.fps) {
+        // The window is on another display, but the stream already matches it. That
+        // display is what the session streams for now, so a retile there is not
+        // worth checking again.
+        m_HasStreamDisplayBounds = SDL_GetDisplayBounds(currentDisplayIndex, &m_StreamDisplayBounds) == 0;
         return false;
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Restarting the stream at %dx%dx%d for SDL display %d (was %dx%dx%d)",
-                width, height, fps, displayIndex,
+                width, height, fps, currentDisplayIndex,
                 m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps);
 
     m_RestartPending = true;
@@ -1872,7 +1943,16 @@ bool Session::pollDisplayFollowRestart()
     // Best effort: let the next session place its window on this display rather
     // than on whatever display the Qt UI is on. Bounds identify the display across
     // the session boundary, where indexes may have been renumbered.
-    m_HasRestartDisplayBounds = SDL_GetDisplayBounds(displayIndex, &m_RestartDisplayBounds) == 0;
+    m_HasRestartDisplayBounds = SDL_GetDisplayBounds(currentDisplayIndex, &m_RestartDisplayBounds) == 0;
+
+    // The window the user has in front of them is about to be destroyed, and the
+    // window manager treats its replacement as a brand new window that inherits
+    // nothing. Carry the state across so it can be asked for again. The window has
+    // already settled on the display it is being followed to, so its size was
+    // measured there.
+    m_RestartWindowFlags = SDL_GetWindowFlags(m_Window);
+    SDL_GetWindowSize(m_Window, &m_RestartWindowWidth, &m_RestartWindowHeight);
+    m_HasRestartWindowState = true;
 
     s_HasAutoRestarted = true;
     s_LastAutoRestartTime = now;
@@ -1915,6 +1995,10 @@ Session* Session::createRestartSession()
     session->m_PendingFps = m_RestartFps;
     session->m_HasPendingDisplayBounds = m_HasRestartDisplayBounds;
     session->m_PendingDisplayBounds = m_RestartDisplayBounds;
+    session->m_HasPendingWindowState = m_HasRestartWindowState;
+    session->m_PendingWindowWidth = m_RestartWindowWidth;
+    session->m_PendingWindowHeight = m_RestartWindowHeight;
+    session->m_PendingWindowFlags = m_RestartWindowFlags;
 
     return session;
 }
@@ -1927,8 +2011,7 @@ static int getDisplayIndexForBounds(const SDL_Rect& bounds)
         SDL_Rect displayBounds;
 
         if (SDL_GetDisplayBounds(i, &displayBounds) == 0 &&
-                displayBounds.x == bounds.x && displayBounds.y == bounds.y &&
-                displayBounds.w == bounds.w && displayBounds.h == bounds.h) {
+                SDL_RectEquals(&displayBounds, &bounds)) {
             return i;
         }
     }
@@ -1938,8 +2021,53 @@ static int getDisplayIndexForBounds(const SDL_Rect& bounds)
     return -1;
 }
 
+// Ratio between a display's pixels and the coordinate space SDL uses for display
+// bounds and window sizes. It is 1 unless the desktop is scaled: under Wayland
+// fractional scaling SDL reports the bounds of a 2560x1600 panel at 125% as
+// 2048x1280 while StreamUtils::getNativeDesktopMode() still reports 2560x1600
+// pixels, so the two together give the scale. This inherits that helper's Wayland
+// assumptions, described in applyNativeDisplayMode(); where they do not hold both
+// sides are the same units and this returns 1 exactly, as it does everywhere else.
+static float getDisplayScale(int displayIndex)
+{
+#ifdef Q_OS_DARWIN
+    // Not usable here: the Darwin branch of getNativeDesktopMode() returns the
+    // panel's native mode, which differs from the bounds both because the desktop
+    // is in points and because the user can run the desktop at a scaled resolution.
+    // The two cannot be told apart, and macOS is excluded from this feature anyway.
+    Q_UNUSED(displayIndex);
+    return 1.0f;
+#else
+    SDL_Rect bounds;
+    SDL_DisplayMode nativeMode;
+    SDL_Rect safeArea;
+
+    if (SDL_GetDisplayBounds(displayIndex, &bounds) != 0 || bounds.w <= 0 || bounds.h <= 0 ||
+            !StreamUtils::getNativeDesktopMode(displayIndex, &nativeMode, &safeArea) ||
+            nativeMode.w <= 0 || nativeMode.h <= 0) {
+        return 1.0f;
+    }
+
+    // Bounds larger than the panel are not a unit difference
+    if (nativeMode.w <= bounds.w || nativeMode.h <= bounds.h) {
+        return 1.0f;
+    }
+
+    // A unit difference scales both axes by the same factor. Anything else is a
+    // real difference between the desktop and the panel, which is not ours to undo.
+    float scaleW = (float)nativeMode.w / bounds.w;
+    float scaleH = (float)nativeMode.h / bounds.h;
+    if (SDL_fabsf(scaleW - scaleH) > 0.01f) {
+        return 1.0f;
+    }
+
+    return scaleW;
+#endif
+}
+
 void Session::getWindowDimensions(int& x, int& y,
-                                  int& width, int& height)
+                                  int& width, int& height,
+                                  int* displayIndexOut)
 {
     int displayIndex = 0;
 
@@ -1961,11 +2089,23 @@ void Session::getWindowDimensions(int& x, int& y,
 
     SDL_Rect usableBounds;
     if (SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0) {
+        // The usable bounds and the window size are in the desktop's coordinate
+        // space, which is not pixels on a scaled display: a 2560x1600 panel at 125%
+        // reports 2048x1280 bounds under Wayland fractional scaling. The stream
+        // resolution is always pixels, so it has to be converted before it can be
+        // compared with the bounds or used as a window size. Without the conversion
+        // a stream at the display's own native resolution never fits its own
+        // display and drops into the 80% branch below, which is how a 2560x1600
+        // stream ends up in a 1638x1024 window.
+        float displayScale = getDisplayScale(displayIndex);
+        int scaledStreamWidth = (int)(m_StreamConfig.width / displayScale + 0.5f);
+        int scaledStreamHeight = (int)(m_StreamConfig.height / displayScale + 0.5f);
+
         // If the stream resolution fits within the usable display area, use it directly
-        if (m_StreamConfig.width <= usableBounds.w &&
-            m_StreamConfig.height <= usableBounds.h) {
-            width = m_StreamConfig.width;
-            height = m_StreamConfig.height;
+        if (scaledStreamWidth <= usableBounds.w &&
+            scaledStreamHeight <= usableBounds.h) {
+            width = scaledStreamWidth;
+            height = scaledStreamHeight;
         } else {
             // Otherwise, use 80% of usable bounds and preserve aspect ratio
             SDL_Rect src, dst;
@@ -1992,6 +2132,61 @@ void Session::getWindowDimensions(int& x, int& y,
     }
 
     x = y = SDL_WINDOWPOS_CENTERED_DISPLAY(displayIndex);
+
+    if (displayIndexOut != nullptr) {
+        *displayIndexOut = displayIndex;
+    }
+}
+
+// Re-applies the state of the window a display-follow restart replaced. The window
+// manager sees a brand new window, so anything the user had set is gone unless it
+// is asked for again. Doing nothing when the state already matches makes this safe
+// to call a second time once the window is on screen.
+void Session::restoreWindowStateAfterRestart()
+{
+    SDL_assert(m_HasPendingWindowState);
+
+    Uint32 flags = SDL_GetWindowFlags(m_Window);
+    Uint32 pendingFullScreenFlag = m_PendingWindowFlags & SDL_WINDOW_FULLSCREEN_DESKTOP;
+
+    // A full-screen toggle made during the last session is not in the preferences
+    // the new window was created from, so it has to be re-applied in both
+    // directions or the restart undoes it
+    if (pendingFullScreenFlag != (flags & SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+        SDL_SetWindowFullscreen(m_Window, pendingFullScreenFlag);
+    }
+    else if (pendingFullScreenFlag == 0 &&
+             (m_PendingWindowFlags & SDL_WINDOW_MAXIMIZED) && !(flags & SDL_WINDOW_MAXIMIZED)) {
+        // Also asked for at creation time; window managers honor one or the other
+        SDL_MaximizeWindow(m_Window);
+    }
+
+    // The stream was in front of the user a moment ago, so put it back in front
+    SDL_RaiseWindow(m_Window);
+}
+
+// Runs once, when the stream window is first drawn.
+void Session::onFirstWindowExpose()
+{
+    // Where a new window lands is the compositor's decision, and on Wayland SDL
+    // only learns it when the surface enters an output, so this is the first point
+    // where the display the stream is on is known rather than predicted.
+    int displayIndex = SDL_GetWindowDisplayIndex(m_Window);
+    if (displayIndex >= 0) {
+        m_HasStreamDisplayBounds = SDL_GetDisplayBounds(displayIndex, &m_StreamDisplayBounds) == 0;
+    }
+
+    // One more attempt at the state a restart is restoring, because a compositor can
+    // drop state asked for while the window was still unmapped. Bounded to this one
+    // extra attempt, and nothing is asked for that is already in place.
+    //
+    // The size is deliberately not asked for again: a tiling window manager fits a
+    // new window into its own layout, which cannot be told apart from a request it
+    // ignored, so a second size request would fight the layout the user set up. The
+    // size is asked for at creation instead, where window managers do honor it.
+    if (m_HasPendingWindowState) {
+        restoreWindowStateAfterRestart();
+    }
 }
 
 void Session::updateOptimalWindowDisplayMode()
@@ -2581,8 +2776,31 @@ void Session::exec()
     QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     QCoreApplication::sendPostedEvents();
 
-    int x, y, width, height;
-    getWindowDimensions(x, y, width, height);
+    int x, y, width, height, windowDisplayIndex = 0;
+    getWindowDimensions(x, y, width, height, &windowDisplayIndex);
+
+    // This session streams for the display its window is created on. Held as bounds
+    // so the display-follow check can tell a retile from a real move without
+    // trusting display indexes to keep their numbering.
+    m_HasStreamDisplayBounds = SDL_GetDisplayBounds(windowDisplayIndex, &m_StreamDisplayBounds) == 0;
+
+    // A display-follow restart carries the size the old window had on the display it
+    // is being followed to. That size is the one the user was actually looking at,
+    // so it wins over the default size for that display, but only if this session
+    // really is placing its window on a display of that size and the size still fits
+    // there. Otherwise it is a size from somewhere else, and the aim is a window
+    // that fills the target display the way a fresh launch does, not one that keeps
+    // a pixel count that meant something on another display. Creating the window at
+    // the right size is also more reliable than resizing it afterward.
+    if (m_HasPendingWindowState && m_HasPendingDisplayBounds && m_HasStreamDisplayBounds &&
+            m_PendingWindowWidth > 0 && m_PendingWindowHeight > 0 &&
+            m_PendingDisplayBounds.w == m_StreamDisplayBounds.w &&
+            m_PendingDisplayBounds.h == m_StreamDisplayBounds.h &&
+            m_PendingWindowWidth <= m_StreamDisplayBounds.w &&
+            m_PendingWindowHeight <= m_StreamDisplayBounds.h) {
+        width = m_PendingWindowWidth;
+        height = m_PendingWindowHeight;
+    }
 
 #ifdef STEAM_LINK
     // We need a little delay before creating the window or we will trigger some kind
@@ -2631,6 +2849,14 @@ void Session::exec()
             defaultWindowFlags |= SDL_WINDOW_MINIMIZED;
         }
 #endif
+    }
+
+    // A display-follow restart replaces a window whose state the launcher window
+    // knows nothing about, so take it from the window that is being replaced. The
+    // minimized flag is deliberately not carried: a minimized window never starts a
+    // restart, and the replacement has to be visible to be placed.
+    if (m_HasPendingWindowState && (m_PendingWindowFlags & SDL_WINDOW_MAXIMIZED)) {
+        defaultWindowFlags |= SDL_WINDOW_MAXIMIZED;
     }
 
     // We use only the computer name on macOS to match Apple conventions where the
@@ -2703,6 +2929,14 @@ void Session::exec()
     if (m_IsFullScreen) {
         SDL_SetWindowFullscreen(m_Window, m_FullScreenFlag);
     }
+
+    // Put the window back the way the user had it before a display-follow restart
+    if (m_HasPendingWindowState) {
+        restoreWindowStateAfterRestart();
+    }
+
+    // One-shot, cleared the first time it runs
+    bool needsFirstExposeHandling = true;
 
     bool needsFirstEnterCapture = false;
     bool needsPostDecoderCreationCapture = false;
@@ -2863,6 +3097,12 @@ void Session::exec()
                 break;
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();
+                break;
+            case SDL_WINDOWEVENT_EXPOSED:
+                if (needsFirstExposeHandling) {
+                    needsFirstExposeHandling = false;
+                    onFirstWindowExpose();
+                }
                 break;
 #if SDL_VERSION_ATLEAST(2, 0, 18)
             case SDL_WINDOWEVENT_DISPLAY_CHANGED:

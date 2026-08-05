@@ -164,7 +164,7 @@ private:
 
     void sendHostDisplayCommand(int width, int height, int frameRate);
 
-    bool getStreamWindowNativeMode(int& displayIndex, int& width, int& height, int& fps);
+    bool getStreamWindowNativeMode(int displayIndex, int& width, int& height, int& fps);
 
     bool validateLaunch(SDL_Window* testWindow);
 
@@ -198,7 +198,12 @@ private:
     bool pollDisplayFollowRestart();
 
     void getWindowDimensions(int& x, int& y,
-                             int& width, int& height);
+                             int& width, int& height,
+                             int* displayIndexOut = nullptr);
+
+    void restoreWindowStateAfterRestart();
+
+    void onFirstWindowExpose();
 
     void toggleFullscreen();
 
@@ -313,14 +318,31 @@ private:
     int m_PendingFps;
     bool m_HasPendingDisplayBounds;
     SDL_Rect m_PendingDisplayBounds;
+    bool m_HasPendingWindowState;
+    int m_PendingWindowWidth;
+    int m_PendingWindowHeight;
+    Uint32 m_PendingWindowFlags;
     bool m_RestartPending;
     int m_RestartWidth;
     int m_RestartHeight;
     int m_RestartFps;
     bool m_HasRestartDisplayBounds;
     SDL_Rect m_RestartDisplayBounds;
+    bool m_HasRestartWindowState;
+    int m_RestartWindowWidth;
+    int m_RestartWindowHeight;
+    Uint32 m_RestartWindowFlags;
     bool m_DisplayFollowArmed;
     Uint32 m_DisplayFollowDeadline;
+
+    // The display this session streams for: the one its mode came from and the one
+    // its window was created on. Held as bounds because display indexes are
+    // renumbered when monitors change. The armed index and the re-arm count keep a
+    // window manager retile from being read as a move to another display.
+    bool m_HasStreamDisplayBounds;
+    SDL_Rect m_StreamDisplayBounds;
+    int m_DisplayFollowArmedDisplayIndex;
+    int m_DisplayFollowRearmCount;
 
     // Mode last requested of the host display, so that a repeat trigger for the
     // mode the host is already set to does not run the command again. Zero until
