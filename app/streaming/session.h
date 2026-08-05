@@ -162,7 +162,9 @@ private:
 
     bool startConnectionAsync();
 
-    void sendHostDisplayCommand();
+    void sendHostDisplayCommand(int width, int height, int frameRate);
+
+    bool getStreamWindowNativeMode(int& displayIndex, int& width, int& height, int& fps);
 
     bool validateLaunch(SDL_Window* testWindow);
 
@@ -319,6 +321,13 @@ private:
     SDL_Rect m_RestartDisplayBounds;
     bool m_DisplayFollowArmed;
     Uint32 m_DisplayFollowDeadline;
+
+    // Mode last requested of the host display, so that a repeat trigger for the
+    // mode the host is already set to does not run the command again. Zero until
+    // the first command runs.
+    int m_HostDisplayWidth;
+    int m_HostDisplayHeight;
+    int m_HostDisplayFps;
     Uint32 m_StreamStartTicks;
 
     bool m_AsyncConnectionSuccess;

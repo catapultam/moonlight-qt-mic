@@ -594,6 +594,9 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_RestartDisplayBounds{},
       m_DisplayFollowArmed(false),
       m_DisplayFollowDeadline(0),
+      m_HostDisplayWidth(0),
+      m_HostDisplayHeight(0),
+      m_HostDisplayFps(0),
       m_StreamStartTicks(0),
       m_AsyncConnectionSuccess(false),
       m_PortTestResults(0),
@@ -1717,8 +1720,50 @@ void Session::armDisplayFollowRestart()
     m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
 }
 
+// Reads the native mode of the display the stream window is on, adjusted to a mode
+// we can stream. SDL knows which display the stream window is on, so no Qt screen
+// matching is needed here.
+bool Session::getStreamWindowNativeMode(int& displayIndex, int& width, int& height, int& fps)
+{
+    displayIndex = SDL_GetWindowDisplayIndex(m_Window);
+    if (displayIndex < 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "SDL_GetWindowDisplayIndex() failed: %s",
+                    SDL_GetError());
+        return false;
+    }
+
+    SDL_DisplayMode mode;
+    SDL_Rect safeArea;
+    if (!StreamUtils::getNativeDesktopMode(displayIndex, &mode, &safeArea)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Unable to read the native mode of SDL display %d",
+                    displayIndex);
+        return false;
+    }
+
+    if (mode.refresh_rate <= 0) {
+        mode.refresh_rate = 60;
+    }
+
+    width = mode.w;
+    height = mode.h;
+    fps = StreamUtils::normalizeRefreshRate(mode.refresh_rate);
+
+    // Compare and request what we would actually stream, not the raw mode
+    if (!validateDisplayMode(width, height, fps)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Staying on the current stream mode.");
+        return false;
+    }
+
+    return true;
+}
+
 // Called once per event loop iteration. Returns true when the session must end to
-// be restarted at the new display's native mode.
+// be restarted at the new display's native mode. With host display sync on, the
+// host display is changed by a command instead and the session keeps running, so
+// this returns false.
 bool Session::pollDisplayFollowRestart()
 {
     if (!m_DisplayFollowArmed) {
@@ -1758,6 +1803,21 @@ bool Session::pollDisplayFollowRestart()
         return false;
     }
 
+    // A host that runs commands can move its own display while the stream keeps
+    // running, so the session never ends for a display change. The rails below
+    // limit how often a session may end, so they do not apply here; the debounce
+    // above and the last-requested-mode check in the command limit how often a
+    // command runs.
+    if (m_Preferences->hostDisplaySync) {
+        int displayIndex, width, height, fps;
+
+        if (getStreamWindowNativeMode(displayIndex, width, height, fps)) {
+            sendHostDisplayCommand(width, height, fps);
+        }
+
+        return false;
+    }
+
     // SDL ticks run for the life of the process, so they stay comparable across
     // sessions and are immune to the clock steps a wall clock would see
     Uint32 now = SDL_GetTicks();
@@ -1782,37 +1842,8 @@ bool Session::pollDisplayFollowRestart()
         return false;
     }
 
-    int displayIndex = SDL_GetWindowDisplayIndex(m_Window);
-    if (displayIndex < 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SDL_GetWindowDisplayIndex() failed: %s",
-                    SDL_GetError());
-        return false;
-    }
-
-    // SDL knows which display the stream window is on, so no Qt screen matching
-    // is needed here.
-    SDL_DisplayMode mode;
-    SDL_Rect safeArea;
-    if (!StreamUtils::getNativeDesktopMode(displayIndex, &mode, &safeArea)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Unable to read the native mode of SDL display %d",
-                    displayIndex);
-        return false;
-    }
-
-    if (mode.refresh_rate <= 0) {
-        mode.refresh_rate = 60;
-    }
-
-    int width = mode.w;
-    int height = mode.h;
-    int fps = StreamUtils::normalizeRefreshRate(mode.refresh_rate);
-
-    // Compare what we would actually request, not the raw mode
-    if (!validateDisplayMode(width, height, fps)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Staying on the current stream mode.");
+    int displayIndex, width, height, fps;
+    if (!getStreamWindowNativeMode(displayIndex, width, height, fps)) {
         return false;
     }
 
@@ -2306,8 +2337,10 @@ bool Session::startConnectionAsync()
 
     // LiStartConnection() only returns success once every stage is up, including
     // the control stream, so this is the last point before the stream is
-    // interactive. A restart builds a new Session, so this runs once per session.
-    sendHostDisplayCommand();
+    // interactive. The stream window does not exist yet, so the mode this session
+    // negotiated is the only mode we can ask the host display for here. It is the
+    // native mode of the display we started on when auto-native resolution is on.
+    sendHostDisplayCommand(m_StreamConfig.width, m_StreamConfig.height, m_StreamConfig.fps);
 
     emit connectionStarted();
     return true;
@@ -2316,9 +2349,10 @@ bool Session::startConnectionAsync()
 // Apollo permission bit that lets a client see and run the host's server commands
 #define SERVER_CMD_PERMISSION 0x00100000
 
-// Runs a command on the host so that the host display matches the mode this
-// session negotiated
-void Session::sendHostDisplayCommand()
+// Runs a command on the host so that the host display becomes the given mode:
+// the mode this session negotiated at connect time, and the native mode of the
+// display the stream window moved to afterward.
+void Session::sendHostDisplayCommand(int width, int height, int frameRate)
 {
     const QStringList commands = m_Computer->serverCommands;
     QString commandNames = commands.isEmpty() ? QString("none") : commands.join(", ");
@@ -2334,8 +2368,15 @@ void Session::sendHostDisplayCommand()
         return;
     }
 
-    QString resolution = QString("%1x%2").arg(m_StreamConfig.width).arg(m_StreamConfig.height);
-    QString fps = QString::number(m_StreamConfig.fps);
+    if (width == m_HostDisplayWidth && height == m_HostDisplayHeight && frameRate == m_HostDisplayFps) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "The host display was already set to %dx%dx%d",
+                    width, height, frameRate);
+        return;
+    }
+
+    QString resolution = QString("%1x%2").arg(width).arg(height);
+    QString fps = QString::number(frameRate);
     int index = -1;
     const char* rule = nullptr;
 
@@ -2400,11 +2441,16 @@ void Session::sendHostDisplayCommand()
         return;
     }
 
+    m_HostDisplayWidth = width;
+    m_HostDisplayHeight = height;
+    m_HostDisplayFps = frameRate;
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Running host command '%s' (index %d), matched by %s",
+                "Running host command '%s' (index %d), matched by %s, for host display mode %dx%dx%d",
                 qPrintable(commands.at(index)),
                 index,
-                rule);
+                rule,
+                width, height, frameRate);
 }
 
 void Session::flushWindowEvents()
