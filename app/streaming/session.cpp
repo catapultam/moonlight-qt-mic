@@ -51,14 +51,18 @@
 // Display-follow tuning. The debounce coalesces the burst of display change events
 // that a dock transition or a monitor hotplug produces.
 #define DISPLAY_FOLLOW_DEBOUNCE_MS 2000
-#define DISPLAY_FOLLOW_STARTUP_GRACE_MS 5000
-#define DISPLAY_FOLLOW_MIN_RESTART_INTERVAL_MS 10000
+#define DISPLAY_FOLLOW_STARTUP_GRACE_MS 3000
+
+// Moving the window back to the display it came from is a normal thing to do, so
+// this only has to outlast the reconnect itself. The chain cap below is what stops
+// a runaway.
+#define DISPLAY_FOLLOW_MIN_RESTART_INTERVAL_MS 3000
 
 // A stream that has been running longer than this starts a new restart chain.
 // Anything faster is treated as part of the same chain and capped, so a display
 // arrangement we keep bouncing between can't restart us indefinitely.
-#define DISPLAY_FOLLOW_CHAIN_RESET_MS 120000
-#define DISPLAY_FOLLOW_MAX_CHAIN 3
+#define DISPLAY_FOLLOW_CHAIN_RESET_MS 60000
+#define DISPLAY_FOLLOW_MAX_CHAIN 6
 
 CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clStageStarting,
