@@ -2146,19 +2146,17 @@ void Session::restoreWindowStateAfterRestart()
 {
     SDL_assert(m_HasPendingWindowState);
 
-    Uint32 flags = SDL_GetWindowFlags(m_Window);
-    Uint32 pendingFullScreenFlag = m_PendingWindowFlags & SDL_WINDOW_FULLSCREEN_DESKTOP;
-
-    // A full-screen toggle made during the last session is not in the preferences
-    // the new window was created from, so it has to be re-applied in both
-    // directions or the restart undoes it
-    if (pendingFullScreenFlag != (flags & SDL_WINDOW_FULLSCREEN_DESKTOP)) {
-        SDL_SetWindowFullscreen(m_Window, pendingFullScreenFlag);
+    // Fill the display again. A tiling window manager gives the replacement window
+    // its own slot, so ask for the whole display every time rather than trying to
+    // reproduce whatever size the old window ended up with.
+    if (m_HasStreamDisplayBounds) {
+        SDL_SetWindowPosition(m_Window, m_StreamDisplayBounds.x, m_StreamDisplayBounds.y);
+        SDL_SetWindowSize(m_Window, m_StreamDisplayBounds.w, m_StreamDisplayBounds.h);
     }
-    else if (pendingFullScreenFlag == 0 &&
-             (m_PendingWindowFlags & SDL_WINDOW_MAXIMIZED) && !(flags & SDL_WINDOW_MAXIMIZED)) {
-        // Also asked for at creation time; window managers honor one or the other
-        SDL_MaximizeWindow(m_Window);
+
+    if (m_Preferences->windowMode != StreamingPreferences::WM_WINDOWED &&
+            !(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP)) {
+        SDL_SetWindowFullscreen(m_Window, SDL_WINDOW_FULLSCREEN_DESKTOP);
     }
 
     // The stream was in front of the user a moment ago, so put it back in front
@@ -2176,14 +2174,9 @@ void Session::onFirstWindowExpose()
         m_HasStreamDisplayBounds = SDL_GetDisplayBounds(displayIndex, &m_StreamDisplayBounds) == 0;
     }
 
-    // One more attempt at the state a restart is restoring, because a compositor can
-    // drop state asked for while the window was still unmapped. Bounded to this one
-    // extra attempt, and nothing is asked for that is already in place.
-    //
-    // The size is deliberately not asked for again: a tiling window manager fits a
-    // new window into its own layout, which cannot be told apart from a request it
-    // ignored, so a second size request would fight the layout the user set up. The
-    // size is asked for at creation instead, where window managers do honor it.
+    // One more attempt at filling the display, because a compositor can drop state
+    // asked for while the window was still unmapped. Bounded to this one extra
+    // attempt, and nothing is asked for that is already in place.
     if (m_HasPendingWindowState) {
         restoreWindowStateAfterRestart();
     }
@@ -2784,22 +2777,14 @@ void Session::exec()
     // trusting display indexes to keep their numbering.
     m_HasStreamDisplayBounds = SDL_GetDisplayBounds(windowDisplayIndex, &m_StreamDisplayBounds) == 0;
 
-    // A display-follow restart carries the size the old window had on the display it
-    // is being followed to. That size is the one the user was actually looking at,
-    // so it wins over the default size for that display, but only if this session
-    // really is placing its window on a display of that size and the size still fits
-    // there. Otherwise it is a size from somewhere else, and the aim is a window
-    // that fills the target display the way a fresh launch does, not one that keeps
-    // a pixel count that meant something on another display. Creating the window at
-    // the right size is also more reliable than resizing it afterward.
-    if (m_HasPendingWindowState && m_HasPendingDisplayBounds && m_HasStreamDisplayBounds &&
-            m_PendingWindowWidth > 0 && m_PendingWindowHeight > 0 &&
-            m_PendingDisplayBounds.w == m_StreamDisplayBounds.w &&
-            m_PendingDisplayBounds.h == m_StreamDisplayBounds.h &&
-            m_PendingWindowWidth <= m_StreamDisplayBounds.w &&
-            m_PendingWindowHeight <= m_StreamDisplayBounds.h) {
-        width = m_PendingWindowWidth;
-        height = m_PendingWindowHeight;
+    // A display-follow restart always fills the display it is following to, whatever
+    // size the old window had. The point of following is to end up on the new
+    // display the way a fresh launch would.
+    if (m_HasPendingWindowState && m_HasStreamDisplayBounds) {
+        x = m_StreamDisplayBounds.x;
+        y = m_StreamDisplayBounds.y;
+        width = m_StreamDisplayBounds.w;
+        height = m_StreamDisplayBounds.h;
     }
 
 #ifdef STEAM_LINK
