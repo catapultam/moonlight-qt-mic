@@ -195,6 +195,8 @@ private:
 
     void armDisplayFollowRestart();
 
+    int queryStreamWindowWorkspace();
+
     bool pollDisplayFollowRestart();
 
     void getWindowDimensions(int& x, int& y,
@@ -343,6 +345,12 @@ private:
     SDL_Rect m_StreamDisplayBounds;
     int m_DisplayFollowArmedDisplayIndex;
     int m_DisplayFollowRearmCount;
+
+    // The workspace this session streams for, as the shell reported it, or -1
+    // when no workspace is known. Under a tiling window manager the monitor the
+    // shell reports changes when a window is only scrolled, while the workspace
+    // changes only when the window is really moved, so the workspace decides.
+    int m_StreamWorkspaceIndex;
 
     // Mode last requested of the host display, so that a repeat trigger for the
     // mode the host is already set to does not run the command again. Zero until

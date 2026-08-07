@@ -55,6 +55,12 @@ static bool callShell(const char* method, const QString& argument, WindowMonitor
     result.rect.w = args.at(4).toInt();
     result.rect.h = args.at(5).toInt();
 
+    // The workspace was added after the first release of the extension, so an
+    // extension that stops at 6 values is answered with "no workspace" rather
+    // than with an error. The caller already handles an unknown workspace,
+    // because the shell also reports one for a window on every workspace.
+    result.workspaceIndex = args.count() >= 7 ? args.at(6).toInt() : -1;
+
     if (result.found && (result.rect.w <= 0 || result.rect.h <= 0)) {
         result.found = false;
         result.unavailableReason = QStringLiteral("%1 returned an empty monitor rect")

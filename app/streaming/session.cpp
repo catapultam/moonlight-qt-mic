@@ -619,6 +619,7 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_StreamDisplayBounds{},
       m_DisplayFollowArmedDisplayIndex(-1),
       m_DisplayFollowRearmCount(0),
+      m_StreamWorkspaceIndex(-1),
       m_HostDisplayWidth(0),
       m_HostDisplayHeight(0),
       m_HostDisplayFps(0),
@@ -1760,6 +1761,28 @@ void Session::armDisplayFollowRestart()
     m_DisplayFollowDeadline = SDL_GetTicks() + DISPLAY_FOLLOW_DEBOUNCE_MS;
 }
 
+// The workspace the stream window is on, or -1 when nothing can say. Only the
+// shell knows; without the extension the answer is always -1 and the
+// display-follow check falls back to comparing monitor rects.
+int Session::queryStreamWindowWorkspace()
+{
+#ifdef HAVE_SHELL_DISPLAY
+    ShellDisplay::WindowMonitor monitor =
+            ShellDisplay::getWindowMonitor(QString::fromUtf8(SDL_GetWindowTitle(m_Window)),
+                                           QGuiApplication::desktopFileName());
+    if (monitor.found) {
+        return monitor.workspaceIndex;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "No workspace for the stream window: %s. The display-follow check "
+                "will compare monitors instead.",
+                qPrintable(monitor.unavailableReason));
+#endif
+
+    return -1;
+}
+
 // Reads the native mode of the given display, adjusted to a mode we can stream.
 // The caller resolves the display, so that every check in one poll works from the
 // same reading of where the stream window is.
@@ -1836,12 +1859,12 @@ bool Session::pollDisplayFollowRestart()
     }
 
     int currentDisplayIndex = -1;
+    int currentWorkspaceIndex = -1;
     QString decisionDetail;
 
 #ifdef HAVE_SHELL_DISPLAY
     // The compositor is the only authoritative source. Ask GNOME Shell first: it
-    // knows which monitor the window is actually on, so a tiling window manager
-    // that scrolls the window across an output boundary does not read as a move.
+    // knows which monitor and which workspace the window is actually on.
     // SDL_GetWindowTitle() is the title the shell sees, taken from the window
     // itself so the two can never drift apart.
     ShellDisplay::WindowMonitor monitor =
@@ -1855,6 +1878,12 @@ bool Session::pollDisplayFollowRestart()
 
         if (shellDisplayIndex >= 0) {
             currentDisplayIndex = shellDisplayIndex;
+
+            // Only the shell reports a workspace. It is trusted only together
+            // with the shell's own monitor answer, so that the SDL fallback
+            // below never mixes a workspace from one reading with a display
+            // from another.
+            currentWorkspaceIndex = monitor.workspaceIndex;
             decisionDetail = QStringLiteral("dbus: ") + rectDetail;
         }
         else {
@@ -1909,19 +1938,62 @@ bool Session::pollDisplayFollowRestart()
         }
     }
 
-    // A window that is still on the display this session streams for has nothing to
-    // follow, whatever the window manager did to its size. Bounds, not the index:
-    // the same display reconfigured to another mode is a change worth following,
-    // and indexes are renumbered when monitors come and go.
+    // Is the window on a different display than the one this session streams for?
+    // Bounds, not the index: indexes are renumbered when monitors come and go.
     SDL_Rect currentBounds;
-    bool treatAsMove = !(m_HasStreamDisplayBounds &&
+    bool rectChanged = !(m_HasStreamDisplayBounds &&
                          SDL_GetDisplayBounds(currentDisplayIndex, &currentBounds) == 0 &&
                          SDL_RectEquals(&currentBounds, &m_StreamDisplayBounds));
 
+    // The display this session streams for cannot be compared: its bounds were
+    // never read, or no display has those bounds any more because the display
+    // changed under the window instead of the window moving. Either way the
+    // stream may be at a mode no display matches, which no workspace can report,
+    // so follow the display as this check did before workspaces.
+    bool streamDisplayGone = rectChanged &&
+                             (!m_HasStreamDisplayBounds ||
+                              getDisplayIndexForRect(m_StreamDisplayBounds, true) < 0);
+
+    // The workspace decides wherever the shell reports one for both ends of the
+    // comparison. A tiling window manager that scrolls a window across an output
+    // boundary changes the monitor the shell computes from the window rect, but
+    // it never changes the workspace; moving the window to another monitor moves
+    // it to that monitor's workspace.
+    bool workspaceKnown = currentWorkspaceIndex >= 0 && m_StreamWorkspaceIndex >= 0;
+
+    bool treatAsMove;
+    const char* decidedBy;
+    if (streamDisplayGone) {
+        treatAsMove = true;
+        decidedBy = "the display this session streams for is gone";
+    }
+    else if (!workspaceKnown) {
+        // No workspace to reason with: an extension too old to report one, a
+        // window on every workspace, or the SDL fallback above. Decide on the
+        // monitor rect alone, which is what this check did before workspaces.
+        treatAsMove = rectChanged;
+        decidedBy = "no workspace is known, so the monitor rect decides";
+    }
+    else if (currentWorkspaceIndex == m_StreamWorkspaceIndex) {
+        treatAsMove = false;
+        decidedBy = "the workspace is unchanged";
+    }
+    else if (!rectChanged) {
+        // The user switched workspaces without leaving the monitor. Nothing to
+        // follow: the mode of the display the window is on has not changed.
+        treatAsMove = false;
+        decidedBy = "another workspace on the same monitor";
+    }
+    else {
+        treatAsMove = true;
+        decidedBy = "another workspace on another monitor";
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Display follow (%s) -> SDL display %d; %s",
+                "Display follow (%s) -> SDL display %d, workspace %d (was %d); %s, so %s",
                 qPrintable(decisionDetail), currentDisplayIndex,
-                treatAsMove ? "treating this as a move" : "the stream is already on it");
+                currentWorkspaceIndex, m_StreamWorkspaceIndex, decidedBy,
+                treatAsMove ? "treating this as a move" : "the stream stays where it is");
 
     if (!treatAsMove) {
         return false;
@@ -1941,6 +2013,7 @@ bool Session::pollDisplayFollowRestart()
             // The stream now follows this display, so a later move back to the old
             // one is a change again
             m_HasStreamDisplayBounds = SDL_GetDisplayBounds(currentDisplayIndex, &m_StreamDisplayBounds) == 0;
+            m_StreamWorkspaceIndex = currentWorkspaceIndex;
         }
 
         return false;
@@ -1984,6 +2057,7 @@ bool Session::pollDisplayFollowRestart()
         // display is what the session streams for now, so a retile there is not
         // worth checking again.
         m_HasStreamDisplayBounds = SDL_GetDisplayBounds(currentDisplayIndex, &m_StreamDisplayBounds) == 0;
+        m_StreamWorkspaceIndex = currentWorkspaceIndex;
         return false;
     }
 
@@ -3020,6 +3094,13 @@ void Session::exec()
 
     // The display-follow grace period runs from here
     m_StreamStartTicks = SDL_GetTicks();
+
+    // The workspace this session streams for, against which the display-follow
+    // check compares. Asked for only when the feature is on, so nothing changes
+    // for a user who does not follow the display.
+    if (m_Preferences->followDisplayMode()) {
+        m_StreamWorkspaceIndex = queryStreamWindowWorkspace();
+    }
 
     // Now that we're about to stream, any SDL_QUIT event is expected
     // unless it comes from the connection termination callback where
