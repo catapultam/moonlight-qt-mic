@@ -138,6 +138,11 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     m_SpecialKeyCombos[KeyComboToggleKeyboardGrab].scanCode = SDL_SCANCODE_K;
     m_SpecialKeyCombos[KeyComboToggleKeyboardGrab].enabled = WMUtils::isRunningDesktopEnvironment();
 
+    m_SpecialKeyCombos[KeyComboResizeToWindow].keyCombo = KeyComboResizeToWindow;
+    m_SpecialKeyCombos[KeyComboResizeToWindow].keyCode = SDLK_r;
+    m_SpecialKeyCombos[KeyComboResizeToWindow].scanCode = SDL_SCANCODE_R;
+    m_SpecialKeyCombos[KeyComboResizeToWindow].enabled = true;
+
     m_OldIgnoreDevices = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES);
     m_OldIgnoreDevicesExcept = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT);
 

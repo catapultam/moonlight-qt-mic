@@ -1,0 +1,74 @@
+// Test of app/streaming/liveresize.h. Build and run in the moonlight toolbox:
+//   g++ -std=c++17 -Wall -Wextra -Werror -I app app/tests/liveresize_test.cpp -o /tmp/liveresize_test
+//   /tmp/liveresize_test
+#include "streaming/liveresize.h"
+
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+
+static void testRoundDownEven()
+{
+    int w = 2537, h = 1391;
+    LiveResize::roundDownEven(w, h);
+    assert(w == 2536 && h == 1390);
+
+    w = 3840; h = 2160;
+    LiveResize::roundDownEven(w, h);
+    assert(w == 3840 && h == 2160);
+
+    // A tiny window gives 0x0; the host refuses it with SIZE_LIMIT
+    w = 1; h = 1;
+    LiveResize::roundDownEven(w, h);
+    assert(w == 0 && h == 0);
+}
+
+static void testPendingRequest()
+{
+    LiveResize::PendingRequest pending;
+    assert(!pending.active);
+    assert(!pending.matchesRefusal(1));
+    assert(!pending.matchesFrame(2536, 1390));
+
+    assert(pending.begin(2536, 1390, 1));
+    assert(pending.active);
+    // A second request while one is pending is refused locally
+    assert(!pending.begin(100, 100, 2));
+    assert(pending.width == 2536 && pending.height == 1390 && pending.requestId == 1);
+
+    assert(pending.matchesRefusal(1));
+    assert(!pending.matchesRefusal(2));
+    assert(pending.matchesFrame(2536, 1390));
+    assert(!pending.matchesFrame(2536, 1392));
+
+    // Review Focus 1: after a timeout and a new request, the old refusal is ignored
+    pending.clear();
+    assert(!pending.active);
+    assert(pending.begin(3840, 2160, 2));
+    assert(!pending.matchesRefusal(1));
+    assert(pending.matchesRefusal(2));
+}
+
+static void testReasonText()
+{
+    char text[128];
+
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonBusy, 0, 0, text, sizeof(text)), "Host is busy with a resize") == 0);
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonNotVirtualDisplay, 0, 0, text, sizeof(text)), "Host does not stream a virtual display") == 0);
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonMultipleClients, 0, 0, text, sizeof(text)), "Another client is connected") == 0);
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonSizeLimit, 2536, 1390, text, sizeof(text)), "Host rejected the size 2536x1390") == 0);
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonDisplayFailed, 0, 0, text, sizeof(text)), "Host could not change the display") == 0);
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonEncoderFailed, 0, 0, text, sizeof(text)), "Host encoder rejected the size") == 0);
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonNotSupported, 0, 0, text, sizeof(text)), "Host does not support live resize") == 0);
+    // An unknown code from a newer host still gives a message
+    assert(strcmp(LiveResize::reasonText(42, 0, 0, text, sizeof(text)), "Host refused the resize (reason 42)") == 0);
+}
+
+int main()
+{
+    testRoundDownEven();
+    testPendingRequest();
+    testReasonText();
+    puts("liveresize_test: all checks passed");
+    return 0;
+}

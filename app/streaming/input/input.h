@@ -90,6 +90,13 @@ public:
 
     void setWindow(SDL_Window* window);
 
+    // Updates the stream size that absolute mouse and touch events are scaled to
+    void setStreamSize(int width, int height)
+    {
+        m_StreamWidth = width;
+        m_StreamHeight = height;
+    }
+
     void handleKeyEvent(SDL_KeyboardEvent* event);
 
     void handleMouseButtonEvent(SDL_MouseButtonEvent* event);
@@ -172,6 +179,7 @@ private:
         KeyComboTogglePointerRegionLock,
         KeyComboQuitAndExit,
         KeyComboToggleKeyboardGrab,
+        KeyComboResizeToWindow,
         KeyComboMax
     };
 

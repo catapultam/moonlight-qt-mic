@@ -230,6 +230,7 @@ HEADERS += \
     settings/streamingpreferences.h \
     streaming/input/input.h \
     streaming/session.h \
+    streaming/liveresize.h \
     streaming/audio/capture/microphonecapture.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \

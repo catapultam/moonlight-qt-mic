@@ -10,6 +10,7 @@
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
+#include "liveresize.h"
 
 class MicrophoneCapture;
 
@@ -127,6 +128,9 @@ public:
 
     void setShouldExit(bool quitHostApp = false);
 
+    // Asks the host to make the stream equal to the window size (Ctrl+Alt+Shift+R)
+    void requestLiveResize();
+
 signals:
     void stageStarting(QString stage);
 
@@ -229,6 +233,21 @@ private:
     void clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags, uint8_t typeLeft, uint8_t typeRight, uint8_t *left, uint8_t *right);
 
     static
+    void clResizeRefused(uint16_t width, uint16_t height, uint32_t requestId, uint16_t reason);
+
+    static
+    Uint32 resizeTimeoutTimerCallback(Uint32 interval, void* param);
+
+    static
+    Uint32 statusOverlayTimerCallback(Uint32 interval, void* param);
+
+    // Shows a live resize message in the status overlay for a few seconds
+    void showResizeStatus(const char* text);
+
+    // Forgets the pending request and stops its timeout
+    void clearPendingResize();
+
+    static
     int arInit(int audioConfiguration,
                const POPUS_MULTISTREAM_CONFIGURATION opusConfig,
                void* arContext, int arFlags);
@@ -288,6 +307,21 @@ private:
     bool m_MicrophoneEnabled;
 
     Overlay::OverlayManager m_OverlayManager;
+
+    // Who put the current text in the status overlay. The connection warning
+    // and the gamepad mouse mode are not replaced by resize messages.
+    enum class StatusOverlayOwner {
+        None,
+        Connection,
+        MouseEmulation,
+        Resize,
+    };
+    StatusOverlayOwner m_StatusOverlayOwner;
+    LiveResize::PendingRequest m_PendingResize;
+    SDL_TimerID m_ResizeTimeoutTimer;
+    SDL_TimerID m_StatusOverlayTimer;
+    // Counts showResizeStatus() calls; a timer event from an older call is ignored
+    uint32_t m_StatusOverlayGeneration;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;

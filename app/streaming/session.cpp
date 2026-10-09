@@ -29,6 +29,14 @@
 #define SDL_CODE_GAMECONTROLLER_SET_MOTION_EVENT_STATE 103
 #define SDL_CODE_GAMECONTROLLER_SET_CONTROLLER_LED 104
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
+#define SDL_CODE_RESIZE_REFUSED 107
+#define SDL_CODE_RESIZE_TIMEOUT 108
+#define SDL_CODE_RESIZE_STATUS_TIMEOUT 109
+
+// Time to wait for the first frame at the new size
+#define RESIZE_TIMEOUT_MS 10000
+// Time a resize message stays in the status overlay
+#define RESIZE_STATUS_MS 5000
 
 #include <openssl/rand.h>
 #include <openssl/sha.h>
@@ -62,7 +70,8 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clRumbleTriggers,
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
-    Session::clSetAdaptiveTriggers
+    Session::clSetAdaptiveTriggers,
+    Session::clResizeRefused
 };
 
 Session* Session::s_ActiveSession;
@@ -193,9 +202,11 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
                                                             s_ActiveSession->m_StreamConfig.bitrate > 5000 ?
                                                                 "Slow connection to PC\nReduce your bitrate" : "Poor connection to PC");
         s_ActiveSession->m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+        s_ActiveSession->m_StatusOverlayOwner = StatusOverlayOwner::Connection;
         break;
     case CONN_STATUS_OKAY:
         s_ActiveSession->m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+        s_ActiveSession->m_StatusOverlayOwner = StatusOverlayOwner::None;
         break;
     }
 }
@@ -274,6 +285,130 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
 
     setControllerLEDEvent.user.data2 = (void *) state;
     SDL_PushEvent(&setControllerLEDEvent);
+}
+
+void Session::clResizeRefused(uint16_t width, uint16_t height, uint32_t requestId, uint16_t reason)
+{
+    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                "Host refused resize request %u to %ux%u with reason %u",
+                requestId, width, height, reason);
+
+    // Handle it on the main thread, which owns the pending state and the overlay
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_RESIZE_REFUSED;
+    event.user.data1 = (void*)(uintptr_t)requestId;
+    event.user.data2 = (void*)(uintptr_t)reason;
+    SDL_PushEvent(&event);
+}
+
+Uint32 Session::resizeTimeoutTimerCallback(Uint32, void* param)
+{
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_RESIZE_TIMEOUT;
+    event.user.data1 = param;
+    SDL_PushEvent(&event);
+
+    // One shot
+    return 0;
+}
+
+Uint32 Session::statusOverlayTimerCallback(Uint32, void* param)
+{
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_RESIZE_STATUS_TIMEOUT;
+    event.user.data1 = param;
+    SDL_PushEvent(&event);
+
+    // One shot
+    return 0;
+}
+
+void Session::showResizeStatus(const char* text)
+{
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Live resize: %s", text);
+
+    // The connection warning and the gamepad mouse mode keep the overlay
+    if (m_StatusOverlayOwner == StatusOverlayOwner::Connection || m_MouseEmulationRefCount > 0) {
+        return;
+    }
+
+    m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate, text);
+    m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+    m_StatusOverlayOwner = StatusOverlayOwner::Resize;
+
+    if (m_StatusOverlayTimer != 0) {
+        SDL_RemoveTimer(m_StatusOverlayTimer);
+    }
+    m_StatusOverlayGeneration++;
+    m_StatusOverlayTimer = SDL_AddTimer(RESIZE_STATUS_MS, statusOverlayTimerCallback,
+                                        (void*)(uintptr_t)m_StatusOverlayGeneration);
+}
+
+void Session::clearPendingResize()
+{
+    m_PendingResize.clear();
+
+    if (m_ResizeTimeoutTimer != 0) {
+        SDL_RemoveTimer(m_ResizeTimeoutTimer);
+        m_ResizeTimeoutTimer = 0;
+    }
+}
+
+void Session::requestLiveResize()
+{
+    int width, height;
+
+    if (!LiIsLiveResizeSupported()) {
+        showResizeStatus("Host does not support live resize");
+        return;
+    }
+
+    if (m_PendingResize.active) {
+        showResizeStatus("Resize in progress");
+        return;
+    }
+
+    if ((SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN) {
+        // Exclusive full screen reports the emulated mode, so read the desktop mode
+        SDL_DisplayMode mode;
+        SDL_Rect safeArea;
+
+        if (!StreamUtils::getNativeDesktopMode(SDL_GetWindowDisplayIndex(m_Window), &mode, &safeArea)) {
+            showResizeStatus("Cannot read the display mode");
+            return;
+        }
+
+        width = mode.w;
+        height = mode.h;
+    }
+    else {
+        // Windowed and borderless full screen report the real pixel size
+        SDL_GetWindowSizeInPixels(m_Window, &width, &height);
+    }
+
+    LiveResize::roundDownEven(width, height);
+
+    if (width == m_ActiveVideoWidth && height == m_ActiveVideoHeight) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Live resize: stream is already %dx%d", width, height);
+        return;
+    }
+
+    uint32_t requestId;
+    if (LiSendResizeRequest((uint16_t)width, (uint16_t)height, &requestId) != 0) {
+        showResizeStatus("Could not send the resize request");
+        return;
+    }
+
+    m_PendingResize.begin(width, height, requestId);
+    m_ResizeTimeoutTimer = SDL_AddTimer(RESIZE_TIMEOUT_MS, resizeTimeoutTimerCallback, (void*)(uintptr_t)requestId);
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Requested live resize from %dx%d to %dx%d (request %u)",
+                m_ActiveVideoWidth, m_ActiveVideoHeight, width, height, requestId);
 }
 
 
@@ -588,7 +723,11 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_AudioSampleCount(0),
       m_DropAudioEndTime(0),
       m_MicrophoneCapture(nullptr),
-      m_MicrophoneEnabled(false)
+      m_MicrophoneEnabled(false),
+      m_StatusOverlayOwner(StatusOverlayOwner::None),
+      m_ResizeTimeoutTimer(0),
+      m_StatusOverlayTimer(0),
+      m_StatusOverlayGeneration(0)
 {
 }
 
@@ -1557,9 +1696,11 @@ void Session::notifyMouseEmulationMode(bool enabled)
     if (m_MouseEmulationRefCount > 0) {
         m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate, "Gamepad mouse mode active\nLong press Start to deactivate");
         m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+        m_StatusOverlayOwner = StatusOverlayOwner::MouseEmulation;
     }
     else {
         m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+        m_StatusOverlayOwner = StatusOverlayOwner::None;
     }
 }
 
@@ -2109,6 +2250,39 @@ void Session::exec()
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
                 break;
+            case SDL_CODE_RESIZE_REFUSED: {
+                uint32_t requestId = (uint32_t)(uintptr_t)event.user.data1;
+                uint16_t reason = (uint16_t)(uintptr_t)event.user.data2;
+
+                if (!m_PendingResize.matchesRefusal(requestId)) {
+                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                "Ignoring refusal of resize request %u (not pending)", requestId);
+                    break;
+                }
+
+                char text[128];
+                LiveResize::reasonText(reason, m_PendingResize.width, m_PendingResize.height, text, sizeof(text));
+                clearPendingResize();
+                showResizeStatus(text);
+                break;
+            }
+            case SDL_CODE_RESIZE_TIMEOUT:
+                if (m_PendingResize.matchesRefusal((uint32_t)(uintptr_t)event.user.data1)) {
+                    clearPendingResize();
+                    showResizeStatus("Host did not answer the resize request");
+                }
+                break;
+            case SDL_CODE_RESIZE_STATUS_TIMEOUT:
+                if ((uint32_t)(uintptr_t)event.user.data1 != m_StatusOverlayGeneration) {
+                    // A timer of an older message that fired before its removal
+                    break;
+                }
+                m_StatusOverlayTimer = 0;
+                if (m_StatusOverlayOwner == StatusOverlayOwner::Resize) {
+                    m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+                    m_StatusOverlayOwner = StatusOverlayOwner::None;
+                }
+                break;
             default:
                 SDL_assert(false);
             }
@@ -2387,6 +2561,13 @@ void Session::exec()
 DispatchDeferredCleanup:
     // Switch back to synchronous logging mode
     StreamUtils::exitAsyncLoggingMode();
+
+    // Stop the live resize timers before this object can go away
+    clearPendingResize();
+    if (m_StatusOverlayTimer != 0) {
+        SDL_RemoveTimer(m_StatusOverlayTimer);
+        m_StatusOverlayTimer = 0;
+    }
 
     destroyMicrophoneCapture();
 
