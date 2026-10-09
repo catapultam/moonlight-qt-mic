@@ -106,25 +106,50 @@ enum class FrameSizeClass {
     NewSize,    // the stream size changed; recreate the decoder
 };
 
+// True when a frame of frameW x frameH is a frame of baseW x baseH with
+// encoder padding: larger by 0 to 63 in both dimensions.
+inline bool isPaddedSize(int frameW, int frameH, int baseW, int baseH)
+{
+    int cropWidth = frameW - baseW;
+    int cropHeight = frameH - baseH;
+    return cropWidth >= 0 && cropWidth < 64 && cropHeight >= 0 && cropHeight < 64;
+}
+
 // Classifies the size of a decoded frame. expectedW/H is the size of a pending
 // resize request, or 0 when none is pending. originalW/H is the size the
 // decoder was created with.
-inline FrameSizeClass classifyFrameSize(int frameW, int frameH, int expectedW, int expectedH, int originalW, int originalH)
+//
+// For NewSize, the function writes the new stream size to streamW/H (when
+// they are not null). This is the requested size when the frame has that
+// size or that size with encoder padding; then the new decoder crops the
+// padding. Else it is the frame size. For the other classes, the function
+// does not write streamW/H.
+inline FrameSizeClass classifyFrameSize(int frameW, int frameH, int expectedW, int expectedH, int originalW, int originalH,
+                                        int* streamW = nullptr, int* streamH = nullptr)
 {
     if (frameW == originalW && frameH == originalH) {
         return FrameSizeClass::Original;
     }
 
-    if (expectedW != 0 && frameW == expectedW && frameH == expectedH) {
+    // The requested size, with or without padding, wins over the padding rule
+    // of the old size
+    if (expectedW != 0 && isPaddedSize(frameW, frameH, expectedW, expectedH)) {
+        if (streamW != nullptr && streamH != nullptr) {
+            *streamW = expectedW;
+            *streamH = expectedH;
+        }
         return FrameSizeClass::NewSize;
     }
 
-    int cropWidth = frameW - originalW;
-    int cropHeight = frameH - originalH;
-    if (cropWidth >= 0 && cropWidth < 64 && cropHeight >= 0 && cropHeight < 64) {
+    if (isPaddedSize(frameW, frameH, originalW, originalH)) {
         return FrameSizeClass::Padding;
     }
 
+    // The host changed the size on its own, or sent a size that we did not request
+    if (streamW != nullptr && streamH != nullptr) {
+        *streamW = frameW;
+        *streamH = frameH;
+    }
     return FrameSizeClass::NewSize;
 }
 

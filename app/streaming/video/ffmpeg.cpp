@@ -1933,10 +1933,12 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // to crop it off. If we find our received frame looks close to our requested
                     // size (where "close" is arbitrarily defined as "within 64 pixels") then just
                     // crop the video to our requested size instead.
+                    int newStreamWidth = 0, newStreamHeight = 0;
                     LiveResize::FrameSizeClass sizeClass =
                         LiveResize::classifyFrameSize(frame->width, frame->height,
                                                       m_ExpectedVideoWidth.load(), m_ExpectedVideoHeight.load(),
-                                                      m_OriginalVideoWidth, m_OriginalVideoHeight);
+                                                      m_OriginalVideoWidth, m_OriginalVideoHeight,
+                                                      &newStreamWidth, &newStreamHeight);
                     if (sizeClass == LiveResize::FrameSizeClass::Padding) {
                         int cropWidth = frame->width - m_OriginalVideoWidth;
                         int cropHeight = frame->height - m_OriginalVideoHeight;
@@ -2054,16 +2056,19 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     if (sizeClass == LiveResize::FrameSizeClass::NewSize) {
                         // The stream size changed. The renderer was created for the old
                         // size, so drop this frame and let the session recreate us.
+                        // The new stream size can be smaller than the frame when the
+                        // encoder adds padding. The new decoder then crops the padding.
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                                    "Stream size changed from %dx%d to %dx%d",
+                                    "Stream size changed from %dx%d to %dx%d (frame %dx%d)",
                                     m_OriginalVideoWidth, m_OriginalVideoHeight,
+                                    newStreamWidth, newStreamHeight,
                                     frame->width, frame->height);
 
                         SDL_Event event = {};
                         event.type = SDL_USEREVENT;
                         event.user.code = SDL_CODE_STREAM_SIZE_CHANGED;
-                        event.user.data1 = (void*)(uintptr_t)frame->width;
-                        event.user.data2 = (void*)(uintptr_t)frame->height;
+                        event.user.data1 = (void*)(uintptr_t)newStreamWidth;
+                        event.user.data2 = (void*)(uintptr_t)newStreamHeight;
                         SDL_PushEvent(&event);
 
                         // Don't consume any additional data

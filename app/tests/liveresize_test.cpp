@@ -89,12 +89,54 @@ static void testClassifyFrameSize()
     assert(classifyFrameSize(2576, 1616, 3840, 2160, 2560, 1600) == FrameSizeClass::Padding);
 }
 
+static void testNewStreamSize()
+{
+    using LiveResize::FrameSizeClass;
+    using LiveResize::classifyFrameSize;
+    int width, height;
+
+    // The frame has the requested size: the stream size is the frame size
+    width = height = -1;
+    assert(classifyFrameSize(2536, 1390, 2536, 1390, 2560, 1600, &width, &height) == FrameSizeClass::NewSize);
+    assert(width == 2536 && height == 1390);
+
+    // Padding encoder, smaller request: the stream size is the requested size,
+    // so the new decoder crops the padding
+    width = height = -1;
+    assert(classifyFrameSize(2560, 1392, 2536, 1390, 2560, 1600, &width, &height) == FrameSizeClass::NewSize);
+    assert(width == 2536 && height == 1390);
+
+    // Padding encoder, request larger by 10: the requested size wins over the
+    // padding rule of the old size
+    width = height = -1;
+    assert(classifyFrameSize(2576, 1616, 2570, 1610, 2560, 1600, &width, &height) == FrameSizeClass::NewSize);
+    assert(width == 2570 && height == 1610);
+
+    // Padding of the requested size is less than 64 in both dimensions
+    assert(classifyFrameSize(2600, 1474, 2536, 1390, 2560, 1600) == FrameSizeClass::NewSize);
+    width = height = -1;
+    assert(classifyFrameSize(2600, 1474, 2536, 1390, 2560, 1600, &width, &height) == FrameSizeClass::NewSize);
+    assert(width == 2600 && height == 1474);
+
+    // No request pending: the stream size is the frame size
+    width = height = -1;
+    assert(classifyFrameSize(2536, 1390, 0, 0, 2560, 1600, &width, &height) == FrameSizeClass::NewSize);
+    assert(width == 2536 && height == 1390);
+
+    // The outputs do not change for Original and Padding
+    width = height = -1;
+    assert(classifyFrameSize(2560, 1600, 2536, 1390, 2560, 1600, &width, &height) == FrameSizeClass::Original);
+    assert(classifyFrameSize(2576, 1616, 0, 0, 2560, 1600, &width, &height) == FrameSizeClass::Padding);
+    assert(width == -1 && height == -1);
+}
+
 int main()
 {
     testRoundDownEven();
     testPendingRequest();
     testReasonText();
     testClassifyFrameSize();
+    testNewStreamSize();
     puts("liveresize_test: all checks passed");
     return 0;
 }
