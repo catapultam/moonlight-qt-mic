@@ -399,17 +399,33 @@ rule, and `app/tests/liveresize_test.cpp` tests it.
 "Padded size of W x H" means larger than W x H by 0 to 63 pixels in both
 dimensions. "Expected size" is the size that the session set with
 `IVideoDecoder::setExpectedFrameSize(w, h)` (new virtual, called by
-`requestLiveResize`; `0, 0` when no request is pending).
+`requestLiveResize`; `0, 0` when no request is pending). "Request frame
+size" is the size of the last frame that the decoder decoded before it saw
+the request (before the crop; `0, 0` when there was none). "Key frame" means
+that the frame has `AV_FRAME_FLAG_KEY` (`key_frame` on older FFmpeg).
 
 1. If the frame size equals the size that the decoder was created with
    (`m_OriginalVideoWidth/Height`): render the frame as today.
-2. Else if an expected size is set and the frame size is a padded size of
-   the expected size: this is the new stream size. The new stream size is
-   the expected size, not the frame size. Thus the new decoder crops the
-   encoder padding with the correct base. Example: a request for 2536x1390
-   on an encoder that sends 2560x1392 gives the stream size 2536x1390.
-   This rule comes before rule 3, so that a request of +10 pixels is not
-   cropped to the old size.
+2. Else if an expected size is set, the frame size is a padded size of
+   the expected size (this includes the exact expected size), and one of
+   these is true:
+   - the frame size is not the request frame size, or
+   - the frame is a key frame,
+
+   then this is the new stream size. The new stream size is the expected
+   size, not the frame size. Thus the new decoder crops the encoder padding
+   with the correct base. Example: a request for 2536x1390 on an encoder
+   that sends 2560x1392 gives the stream size 2536x1390. This rule comes
+   before rule 3, so that a request of +10 pixels is not cropped to the old
+   size.
+
+   Why the second condition: on an encoder that pads, an old frame can be a
+   padded size of the request. Example: the stream is 1920x1080, the encoder
+   sends 1920x1088, and the request is 1900x1060 (or exactly 1920x1088).
+   Without the condition, the next old frame would apply the request before
+   the host changes the size, and a refusal would then be ignored. A frame
+   of the request frame size is a frame of the new stream only when it is a
+   key frame. The host starts the new stream with an IDR frame.
 3. Else if the frame size is a padded size of the original size: crop as
    today.
 4. Else: this is a new stream size too, and the new stream size is the frame
