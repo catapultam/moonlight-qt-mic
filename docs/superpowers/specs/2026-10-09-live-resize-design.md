@@ -35,7 +35,7 @@ Research clones (read-only) are in `/tmp/live-resize/apollo-microphone`
 | D6 | The client recreates its decoder and renderer when a decoded frame arrives at the requested size. It uses the existing recreate path (`SDL_RENDER_DEVICE_RESET` handling in `Session::execInternal`). | All renderers get a clean start at the new size. No per-renderer resize code. |
 | D7 | The host refuses the request when more than one client session is active, when the capture display is not a SudoVDA monitor, when a resize is in progress, or when the size is out of limits. | One VDD serves all sessions. A resize would change the picture for the other clients. |
 | D8 | The hotkey is `Ctrl+Alt+Shift+R`. It works only while a stream is active. | `R` is free. Used keys: Q, Z, X, S, M, C, D, V, L, E, K (`app/streaming/input/input.cpp:86-138`). |
-| D9 | In full-screen mode the target size is the native mode of the display that shows the window. In windowed mode it is `SDL_GetWindowSizeInPixels()`. | User rule. sdl2-compat 2.32 provides `SDL_GetWindowSizeInPixels` (`/usr/include/SDL2/SDL_video.h:1103` in the `moonlight` toolbox). |
+| D9 | In windowed and borderless full-screen (`SDL_WINDOW_FULLSCREEN_DESKTOP`) mode the target size is `SDL_GetWindowSizeInPixels()`. In exclusive full-screen (`SDL_WINDOW_FULLSCREEN`) it is the desktop mode of `SDL_GetWindowDisplayIndex()`. | Spike S3 (2026-10-09, GNOME 50, monitors at 100 % and 125 %): windowed and borderless full-screen report the real physical size (3840x2160 on the 4K monitor). Exclusive full-screen reports the emulated mode that Moonlight set (1920x1080), so the desktop mode is necessary there. The window display index was wrong once in S3, so exclusive full-screen with two monitors can pick the wrong monitor. This is an accepted limit. |
 | D10 | The client does not save the new size to the settings. | The window size is transient. The saved resolution stays the start size. |
 
 Decisions that the user must confirm:
@@ -366,10 +366,11 @@ flag, the capture display is physical and the host refuses with
 
 1. If `!LiIsLiveResizeSupported()`: show reason 7 and return.
 2. If a request is pending: show "Resize in progress" and return.
-3. Full screen (`SDL_GetWindowFlags(m_Window) & m_FullScreenFlag`): use the
-   native mode of the window display, `StreamUtils::getNativeDesktopMode()`
-   (used in `session.cpp:1416`). Windowed: `SDL_GetWindowSizeInPixels(m_Window,
-   &w, &h)`.
+3. Exclusive full screen (`(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN`):
+   use the desktop mode of the window display,
+   `StreamUtils::getNativeDesktopMode(SDL_GetWindowDisplayIndex(m_Window), ...)`
+   (used in `session.cpp:1416`). Windowed or borderless full screen:
+   `SDL_GetWindowSizeInPixels(m_Window, &w, &h)` (see D9 and spike S3).
 4. Apply D4: `w &= ~1; h &= ~1;`. If `w == m_ActiveVideoWidth && h ==
    m_ActiveVideoHeight`, return without a message.
 5. Store `m_PendingResize = {w, h, requestId}`, start a 10 second timer
@@ -381,8 +382,9 @@ Note on full screen: `app/main.cpp:753` sets
 `Session::updateOptimalWindowDisplayMode()` calls `SDL_SetWindowDisplayMode`.
 Under exclusive `SDL_WINDOW_FULLSCREEN` the pixel size that SDL reports may be
 the emulated mode and not the native mode. The native-mode query in step 3
-avoids this. The spike in section 8 confirms the values on GNOME Wayland for
-both `SDL_WINDOW_FULLSCREEN` and `SDL_WINDOW_FULLSCREEN_DESKTOP`.
+avoids this. Spike S3 confirmed this: exclusive full screen reported 1920x1080 (the
+emulated mode), and borderless full screen reported 3840x2160 (the real
+size).
 
 ### 5.4 Decoder: detect the new size
 
@@ -617,7 +619,7 @@ implementation.
 | R4 | The 2025-07 `ci-windows.yml` cannot build the 2026-03 tree. | Spike S2: run the restored workflow on unchanged `0affdaa6` before any code change (section 6.1 step 3). |
 | R5 | The encoder rejects the new size and `capture_async` spins (pre-existing bug made reachable). | Section 4.4 step 4 adds the revert. Test it by sending a size above the H.264 limit with the limit check disabled. |
 | R6 | The decoded frame at the new size reaches a renderer before the recreate and crashes `SdlRenderer`. | Section 5.4 drops the frame. Test with `--video-decoder software` and the SDL renderer path forced. |
-| R7 | On GNOME Wayland `SDL_GetWindowSizeInPixels` reports a size that differs from the real buffer with fractional scaling, or the full-screen value is the emulated mode. | Spike S3: log `SDL_GetWindowSize`, `SDL_GetWindowSizeInPixels`, `SDL_GL_GetDrawableSize` and the native mode at 100 %, 150 % and 200 % scale, windowed and both full-screen flags. Ten lines in `Session::execInternal` behind an environment variable. |
+| R7 | On GNOME Wayland `SDL_GetWindowSizeInPixels` reports a size that differs from the real buffer with fractional scaling, or the full-screen value is the emulated mode. | Resolved by spike S3 (2026-10-09): windowed and borderless full-screen sizes are physical pixels at 100 % and 125 % scale (window size, pixel size and Vulkan drawable size are equal). Exclusive full screen reports the emulated mode; D9 uses the desktop mode there. |
 | R8 | A refusal arrives after the timeout, or two requests interleave. | `request_id` matching (section 3.1) and the pending state machine. Unit test the state transitions. |
 | R9 | The control stream is not encrypted (old protocol) and the request goes out in plain text. | `LiSendResizeRequest` returns an error unless `encryptedControlStream` is set. The host already drops plain messages on protocol 13 (`src/stream.cpp:571`). |
 | R10 | The mic stream (`MicrophoneStream.c`) or audio resets during the host reinit. | The reinit touches only video. Check in the manual test step 11. The memory note warns that `sdlaud.cpp` debug asserts fire when the renderer reinits with the mic on; run the test with a release build and watch for the assert in a debug build. |
