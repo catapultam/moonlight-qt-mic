@@ -392,19 +392,37 @@ size).
 treats any frame that is larger than `m_OriginalVideoWidth/Height` by less
 than 64 pixels in both dimensions as encoder padding and crops it. A resize of
 +10 pixels would be cropped. New rule, in this order, after
-`avcodec_receive_frame()` returns a frame:
+`avcodec_receive_frame()` returns a frame. The free function
+`LiveResize::classifyFrameSize()` in `app/streaming/liveresize.h` holds the
+rule, and `app/tests/liveresize_test.cpp` tests it.
 
-1. If `frame->width x frame->height` equals the expected size that the
-   session set with `IVideoDecoder::setExpectedFrameSize(w, h)` (new virtual,
-   called by `requestLiveResize`), this is the new stream size. Do not
-   render the frame. Free it. Push `SDL_USEREVENT` with code
-   `SDL_CODE_STREAM_SIZE_CHANGED` and the size in `data1/data2`. Set
-   `m_DecoderThreadShouldQuit`, as the consistent-failure path does
-   (`ffmpeg.cpp:2075-2085`).
-2. Else if the old padding rule matches (larger in both dimensions by less
-   than 64): crop as today.
-3. Else: treat as a new stream size too (step 1). This covers a host that
-   changed size on its own.
+"Padded size of W x H" means larger than W x H by 0 to 63 pixels in both
+dimensions. "Expected size" is the size that the session set with
+`IVideoDecoder::setExpectedFrameSize(w, h)` (new virtual, called by
+`requestLiveResize`; `0, 0` when no request is pending).
+
+1. If the frame size equals the size that the decoder was created with
+   (`m_OriginalVideoWidth/Height`): render the frame as today.
+2. Else if an expected size is set and the frame size is a padded size of
+   the expected size: this is the new stream size. The new stream size is
+   the expected size, not the frame size. Thus the new decoder crops the
+   encoder padding with the correct base. Example: a request for 2536x1390
+   on an encoder that sends 2560x1392 gives the stream size 2536x1390.
+   This rule comes before rule 3, so that a request of +10 pixels is not
+   cropped to the old size.
+3. Else if the frame size is a padded size of the original size: crop as
+   today.
+4. Else: this is a new stream size too, and the new stream size is the frame
+   size. This covers a host that changed size on its own.
+
+For rules 2 and 4: do not render the frame. Free it. Push `SDL_USEREVENT`
+with code `SDL_CODE_STREAM_SIZE_CHANGED` and the new stream size in
+`data1/data2`. Set `m_DecoderThreadShouldQuit`, as the consistent-failure
+path does (`ffmpeg.cpp:2075-2085`).
+
+`SDL_CODE_STREAM_SIZE_CHANGED` (value 106) is defined in
+`app/streaming/video/decoder.h`, not in `session.cpp`, because
+`ffmpeg.cpp` pushes it.
 
 Why not render the frame with the old renderer: `SdlRenderer` creates its
 texture at the first frame size (`sdlvid.cpp:416-420`), and the VAAPI and
@@ -415,24 +433,31 @@ VAAPI direct, DRM and SDL alike.
 ### 5.5 Session: apply the new size
 
 New `SDL_USEREVENT` codes next to `session.cpp:26-31`:
-`SDL_CODE_STREAM_SIZE_CHANGED`, `SDL_CODE_RESIZE_REFUSED`,
-`SDL_CODE_RESIZE_TIMEOUT`.
+`SDL_CODE_RESIZE_REFUSED` (107), `SDL_CODE_RESIZE_TIMEOUT` (108) and
+`SDL_CODE_RESIZE_STATUS_TIMEOUT` (109). `SDL_CODE_STREAM_SIZE_CHANGED` (106)
+is in `decoder.h` (section 5.4).
 
-On `SDL_CODE_STREAM_SIZE_CHANGED` in `Session::execInternal`:
+On `SDL_CODE_STREAM_SIZE_CHANGED` in `Session::execInternal`,
+`Session::applyStreamSize(w, h)` does these steps:
 
-1. `m_ActiveVideoWidth/Height = w, h` (these feed `chooseDecoder` in the
+1. Clear `m_PendingResize`, stop the timer, and set the expected size of
+   the old decoder to `0, 0` (`clearPendingResize()`). If a request was
+   pending and `w x h` is not the requested size, log a warning.
+2. `m_ActiveVideoWidth/Height = w, h` (these feed `chooseDecoder` in the
    recreate path, `session.cpp:2270-2274`). Also `m_StreamConfig.width/height`
    for the bitrate and window helpers that read it.
-2. `m_InputHandler->setStreamSize(w, h)` (new setter for `m_StreamWidth/
+3. `m_InputHandler->setStreamSize(w, h)` (new setter for `m_StreamWidth/
    m_StreamHeight`, `input.h:245-246`). The absolute mouse and touch paths
    read these on every event (`mouse.cpp:130, 329, 366`, `abstouch.cpp:70,
    175`, `reltouch.cpp:100`).
-3. Clear `m_PendingResize` and stop the timer.
 4. Push `SDL_RENDER_DEVICE_RESET`. The existing handler
    (`session.cpp:2224-2300`) deletes the decoder, flushes window events,
    calls `chooseDecoder` with the new size, and calls `LiRequestIdrFrame()`.
-5. Call `m_VideoDecoder->setExpectedFrameSize(w, h)` on the new decoder so
-   that the padding rule has the right base.
+
+The new decoder does not need `setExpectedFrameSize()`. It is created with
+`w x h`, which is the requested size when the encoder adds padding (section
+5.4, rule 2). Thus its original size is the correct base for the padding
+rule, and it crops the padding.
 
 Overlays: `completeInitialization` calls
 `setOverlayRenderer(m_FrontendRenderer)` (`ffmpeg.cpp:727`), so the debug
@@ -565,11 +590,11 @@ pointer in `moonlight-qt-mic`.
   on Linux with the repository `tests/CMakeLists.txt`. The Windows workflow in
   section 6.1 does not run tests; run them locally in a Linux build or add a
   Linux job later.
-- Client: `moonlight-qt` has no test target. Add a small `QTest` or plain
-  `assert` test only for the size rule (`roundDownEven`) if the reviewers ask
-  for it. The decoder rule (section 5.4) gets a table-driven unit test if we
-  factor it into a free function `classifyFrameSize(frame, expected,
-  original)`.
+- Client: `moonlight-qt` has no test target. `app/tests/liveresize_test.cpp`
+  is a plain `assert` test of the header-only helpers in
+  `app/streaming/liveresize.h`: the size rule (`roundDownEven`), the
+  refusal texts, the pending request, and the decoder rule of section 5.4
+  (`classifyFrameSize()` and the new stream size that it gives).
 - common-c: build with `-DUSE_MBEDTLS` off in the toolbox and check that
   `LiSendResizeRequest` returns an error when no connection exists.
 
