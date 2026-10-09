@@ -191,39 +191,49 @@ Driver (HDR)/SudoVDA/Driver.cpp`):
 - The EDID is `edid_base` plus serial, serial string and product name
   (`edid.h:29`). The physical size bytes do not change.
 
-Procedure, in a worker thread:
+Procedure, `live_resize::change_display_size(w, h)` (`src/live_resize.cpp`),
+called from a worker thread. It holds `proc::vdd_lock` for all steps.
+Spikes S1 and S1b set this order: a mode change without a re-add to a size
+that is not in the mode list returns `DISP_CHANGE_BADMODE` (-2), so the
+function does not try it first.
 
-1. Read the current mode with `VDISPLAY::getDeviceSettings(name, devMode)`
-   (`src/platform/windows/virtual_display.h:25`). Keep width, height,
-   frequency for the revert.
-2. Try `VDISPLAY::changeDisplaySettings(name, w, h, target_fps)`
-   (`virtual_display.cpp:265`). Its return value is not usable: after the
-   `ChangeDisplaySettingsExW` calls it always returns
-   `changeDisplaySettings2(...)` (`virtual_display.cpp:308`). Read the mode
-   back with `getDeviceSettings()` and compare width and height. If they
-   match, go to step 6. This works only for sizes in the mode list, for
-   example when the user goes back to the start size. Spike S1 confirms
-   that `changeDisplaySettings2` has no side effect on a rejected mode.
-3. `VDISPLAY::removeVirtualDisplay(proc_t::vdd.guid)`
-   (`virtual_display.cpp:691`).
-4. `VDISPLAY::createVirtualDisplay(vdd.device_uuid, vdd.device_name, w, h,
+1. Check `proc::proc.vdd.valid` and `proc::proc.virtual_display`. If one is
+   false, return a failure and change nothing (section 4.6).
+2. `VDISPLAY::removeVirtualDisplay(vdd.guid)` (`virtual_display.cpp:691`).
+   A failed remove is not fatal: the add in step 3 returns the existing
+   monitor for a known GUID.
+3. `VDISPLAY::createVirtualDisplay(vdd.device_uuid, vdd.device_name, w, h,
    vdd.target_fps, vdd.guid)` (`virtual_display.cpp:656`) with the same
-   arguments that `proc_t::execute` used (`src/process.cpp:291-298`).
-   `_launch_session` is private (`src/process.h:149`), so `proc_t` gets a
-   public struct `vdd {device_uuid, device_name, target_fps, guid}` that
-   `execute` fills at launch and `terminate` clears. `createVirtualDisplay`
-   polls up to about 640 ms for the device name. If it returns an empty
-   name, revert (step 7) and refuse with `DISPLAY_FAILED`.
-5. `VDISPLAY::changeDisplaySettings(newName, w, h, target_fps)` and, when
+   GUID and the same arguments that `proc_t::execute` used.
+   `_launch_session` is private, so `proc_t` has a public struct `vdd`
+   {valid, device_uuid, device_name, target_fps, guid} that `execute` fills
+   at launch and `terminate` clears. `createVirtualDisplay` polls up to
+   about 640 ms for the device name.
+4. `VDISPLAY::changeDisplaySettings(name, w, h, target_fps)` and, when
    `config::video.isolated_virtual_display_option` is set,
-   `changeDisplaySettings2(..., true)`, as in `src/process.cpp:308-317`.
-   Set `proc::proc.display_name = to_utf8(newName)` and
-   `config::video.output_name = display_device::map_display_name(...)`
-   (`src/process.cpp:321-327`). Also update `launch_session->width/height`.
-6. Done. The capture thread sees `DXGI_ERROR_ACCESS_LOST` and reinitializes
-   on its own.
-7. Revert: create the monitor again with the old width, height, frequency,
-   and apply the old mode. Clear the pending size (section 4.4).
+   `changeDisplaySettings2(..., true)`, as `execute` does. After a re-add of
+   the same GUID, Windows first applies the mode that it saved for this
+   monitor identity. This call applies the new size (spike S1b).
+5. Read the mode back with `VDISPLAY::getDeviceSettings()`. It returns the
+   BOOL of `EnumDisplaySettingsW`, not zero on success. If width and height
+   match, go to step 7.
+6. Fallback with a new GUID: remove the old GUID always (the add in step 3
+   can succeed also when the name poll times out; a remove of an unknown
+   GUID only returns false). Make a new GUID and record it with
+   `proc_t::set_vdd_guid()` before the add, so that `terminate` removes the
+   new monitor also when the add gives no name. Then do steps 3, 4 and 5
+   again with the new GUID. If the size is still wrong, return a failure.
+7. Success: set `proc::proc.display_name = to_utf8(name)`,
+   `config::video.output_name = display_device::map_display_name(...)` and
+   the launch session width and height (`proc_t::set_vdd_size()`). The
+   capture thread sees `DXGI_ERROR_ACCESS_LOST` and reinitializes on its
+   own.
+8. Revert is the job of the caller (the worker, section 4.4): on a failure
+   it calls `change_display_size()` again with the old size and clears the
+   pending size. After a failure, `display_name` and `output_name` still
+   name the old monitor, which can be missing. If the revert also fails,
+   the session has no display and the worker must stop the stream.
+   `src/live_resize.h` lists the state after each result.
 
 `target_fps` follows `src/process.cpp:277-287`: take `launch_session->fps`,
 multiply by 1000 when below 1000, double it when
@@ -257,7 +267,7 @@ loop, which it reaches when `encode_run` exits on `reinit_event`.
    worker drains the event with `pop(0ms)` so that the next unrelated reinit
    does not apply the size. If the capture thread already consumed it, the
    worker raises `mail::resize` with the old size and the display revert
-   (section 4.3 step 7) triggers the reinit that applies it.
+   (section 4.3 step 8) triggers the reinit that applies it.
 4. Encoder failure: `encode_run` returns at once when
    `make_encode_session` returns null (`src/video.cpp:1914`). Today
    `capture_async` then loops without delay and tries again forever. Add a
@@ -322,14 +332,21 @@ streams the display may resize it. Reviewers may decide to gate it behind
   15 seconds.
 - `session::stop` and `proc_t::terminate` while the worker runs: `terminate`
   removes the VDD by GUID (`src/process.cpp:759-767`). If it runs between
-  worker step 3 (remove) and step 4 (create), the worker re-adds a monitor
+  worker step 2 (remove) and step 3 (add), the worker re-adds a monitor
   that nobody owns. The next launch with the same GUID then gets that stale
   monitor back from `IOCTL_ADD_VIRTUAL_DISPLAY` (Driver.cpp line 1520) with
-  the old mode list. Fix: `proc_t` gets a `std::mutex vdd_lock`. The worker
-  holds it from step 3 to step 5. `terminate` holds it around its
-  `removeVirtualDisplay` call and clears `proc_t::vdd`. After the worker
-  takes the lock it checks `proc::proc.running()` and that `vdd.guid` is
-  still set; if not, it exits without step 4.
+  the old mode list. Fix: the namespace mutex `proc::vdd_lock`. It is not a
+  `proc_t` member, because `proc_t` uses `KITTY_DEFAULT_CONSTR_MOVE_THROW`
+  and a `std::mutex` member deletes the move constructor that
+  `proc::refresh()` needs. `change_display_size()` holds it for all steps
+  of section 4.3. `terminate` holds it around its `removeVirtualDisplay`
+  call and clears `proc_t::vdd`. After the worker takes the lock it checks
+  `vdd.valid`, not `proc::proc.running()`: `running()` can call
+  `terminate()`, which locks `vdd_lock` again on the same thread. Because
+  `terminate` clears `vdd` under the lock, `vdd.valid` is false after the
+  app stops.
+- The lock is held for up to about 2 x 640 ms of name polling plus two mode
+  changes. `terminate` waits for the lock during this time.
 
 ### 4.7 headless_mode interaction
 
