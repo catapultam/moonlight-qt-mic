@@ -27,7 +27,9 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
       m_LongPressTimer(0),
       m_StreamWidth(streamWidth),
       m_StreamHeight(streamHeight),
-      m_AbsoluteMouseMode(prefs.absoluteMouseMode),
+      m_AbsoluteMouseMode(prefs.mouseMode == StreamingPreferences::MM_ON),
+      m_MouseModeFollowsWindow(prefs.mouseMode == StreamingPreferences::MM_AUTO),
+      m_LastFollowedFullScreen(-1),
       m_AbsoluteTouchMode(prefs.absoluteTouchMode),
       m_DisabledTouchFeedback(false),
       m_LeftButtonReleaseTimer(0),
@@ -403,6 +405,50 @@ void SdlInputHandler::setCaptureActive(bool active)
 
     // Now update the keyboard grab
     updateKeyboardGrabState();
+}
+
+bool SdlInputHandler::isAbsoluteMouseMode()
+{
+    return m_AbsoluteMouseMode;
+}
+
+// In the automatic mouse mode, uses the remote desktop mouse mode in a window
+// and the game mouse mode in full-screen. Acts only when the full-screen state
+// changes, so a mouse mode the user toggled with Ctrl+Alt+Shift+M stays until
+// the next change.
+void SdlInputHandler::updateMouseModeForWindow()
+{
+    if (!m_MouseModeFollowsWindow || m_Window == nullptr) {
+        return;
+    }
+
+    int fullScreen = (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
+    if (fullScreen == m_LastFollowedFullScreen) {
+        return;
+    }
+    m_LastFollowedFullScreen = fullScreen;
+
+    bool absoluteMouseMode = !fullScreen;
+    if (absoluteMouseMode == m_AbsoluteMouseMode) {
+        return;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Switching to %s mouse mode for %s",
+                absoluteMouseMode ? "remote desktop" : "game",
+                fullScreen ? "full-screen" : "windowed mode");
+
+    // Same sequence as the mouse mode toggle combo
+    bool wasCaptured = isCaptureActive();
+    if (wasCaptured) {
+        setCaptureActive(false);
+    }
+
+    m_AbsoluteMouseMode = absoluteMouseMode;
+
+    if (wasCaptured) {
+        setCaptureActive(true);
+    }
 }
 
 void SdlInputHandler::handleTouchFingerEvent(SDL_TouchFingerEvent* event)

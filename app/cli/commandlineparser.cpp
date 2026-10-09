@@ -449,8 +449,12 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // Resolve --quit-after and --no-quit-after options
     preferences->quitAppAfter = parser.getToggleOptionValue("quit-after", preferences->quitAppAfter);
 
-    // Resolve --absolute-mouse and --no-absolute-mouse options
-    preferences->absoluteMouseMode = parser.getToggleOptionValue("absolute-mouse", preferences->absoluteMouseMode);
+    // Resolve --absolute-mouse and --no-absolute-mouse options. An explicit
+    // mouse mode applies in both windowed and full-screen mode.
+    if (parser.isSet("absolute-mouse") || parser.isSet("no-absolute-mouse")) {
+        preferences->mouseMode = parser.getToggleOptionValue("absolute-mouse", false) ?
+                                     StreamingPreferences::MM_ON : StreamingPreferences::MM_OFF;
+    }
 
     // Resolve --mouse-buttons-swap and --no-mouse-buttons-swap options
     preferences->swapMouseButtons = parser.getToggleOptionValue("mouse-buttons-swap", preferences->swapMouseButtons);

@@ -146,6 +146,10 @@ public:
 
     void setCaptureActive(bool active);
 
+    bool isAbsoluteMouseMode();
+
+    void updateMouseModeForWindow();
+
     bool isMouseInVideoRegion(int mouseX, int mouseY, int windowWidth = -1, int windowHeight = -1);
 
     void updateKeyboardGrabState();
@@ -241,6 +245,8 @@ private:
     int m_StreamWidth;
     int m_StreamHeight;
     bool m_AbsoluteMouseMode;
+    bool m_MouseModeFollowsWindow;
+    int m_LastFollowedFullScreen;
     bool m_AbsoluteTouchMode;
     bool m_DisabledTouchFeedback;
 

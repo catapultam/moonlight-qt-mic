@@ -1434,15 +1434,50 @@ Flickable {
                 anchors.fill: parent
                 spacing: 5
 
-                CheckBox {
-                    id: absoluteMouseCheck
-                    hoverEnabled: true
+                Label {
                     width: parent.width
+                    id: mouseModeTitle
                     text: qsTr("Optimize mouse for remote desktop instead of games")
-                    font.pointSize:  12
-                    checked: StreamingPreferences.absoluteMouseMode
-                    onCheckedChanged: {
-                        StreamingPreferences.absoluteMouseMode = checked
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                AutoResizingComboBox {
+                    // ignore setting the index at first, and actually set it when the component is loaded
+                    Component.onCompleted: {
+                        var saved_mousemode = StreamingPreferences.mouseMode
+                        currentIndex = 0
+                        for (var i = 0; i < mouseModeListModel.count; i++) {
+                            var el_mousemode = mouseModeListModel.get(i).val;
+                            if (saved_mousemode === el_mousemode) {
+                                currentIndex = i
+                                break
+                            }
+                        }
+                        activated(currentIndex)
+                    }
+
+                    id: mouseModeComboBox
+                    hoverEnabled: true
+                    textRole: "text"
+                    model: ListModel {
+                        id: mouseModeListModel
+                        ListElement {
+                            text: qsTr("Off")
+                            val: StreamingPreferences.MM_OFF
+                        }
+                        ListElement {
+                            text: qsTr("On")
+                            val: StreamingPreferences.MM_ON
+                        }
+                        ListElement {
+                            text: qsTr("Auto (on in a window, off in full-screen)")
+                            val: StreamingPreferences.MM_AUTO
+                        }
+                    }
+                    // ::onActivated must be used, as it only listens for when the index is changed by a human
+                    onActivated: {
+                        StreamingPreferences.mouseMode = mouseModeListModel.get(currentIndex).val
                     }
 
                     ToolTip.delay: 1000
@@ -1450,6 +1485,7 @@ Flickable {
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("This enables seamless mouse control without capturing the client's mouse cursor. It is ideal for remote desktop usage but will not work in most games.") + " " +
                                   qsTr("You can toggle this while streaming using Ctrl+Alt+Shift+M.") + "\n\n" +
+                                  qsTr("Auto changes the mode each time the stream enters or leaves full-screen. A toggle with Ctrl+Alt+Shift+M stays until the next change.") + "\n\n" +
                                   qsTr("NOTE: Due to a bug in GeForce Experience, this option may not work properly if your host PC has multiple monitors.")
                 }
 

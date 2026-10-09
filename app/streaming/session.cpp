@@ -980,7 +980,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         return false;
     }
 
-    if (m_Preferences->absoluteMouseMode && !m_App.isAppCollectorGame) {
+    if (m_Preferences->mouseMode == StreamingPreferences::MM_ON && !m_App.isAppCollectorGame) {
         emitLaunchWarning(tr("Your selection to enable remote desktop mouse mode may cause problems in games."));
     }
 
@@ -1962,11 +1962,15 @@ void Session::exec()
     bool needsFirstEnterCapture = false;
     bool needsPostDecoderCreationCapture = false;
 
+    // Choose the mouse mode for the initial window mode, if it follows the
+    // window mode
+    m_InputHandler->updateMouseModeForWindow();
+
     // Avoid capturing the mouse initially for windowed relative mode.
     // We still capture in windowed absolute mode because it doesn't
     // constrain the motion of the cursor. This allows the user to
     // easily reposition or resize the window.
-    if (m_IsFullScreen || m_Preferences->absoluteMouseMode) {
+    if (m_IsFullScreen || m_InputHandler->isAbsoluteMouseMode()) {
         // HACK: For Wayland, we wait until we get the first SDL_WINDOWEVENT_ENTER
         // event where it seems to work consistently on GNOME. For other platforms,
         // especially where SDL may call SDL_RecreateWindow(), we must only capture
@@ -2111,6 +2115,10 @@ void Session::exec()
                 m_InputHandler->notifyMouseLeave();
                 break;
             }
+
+            // The full-screen state can change without a request from us, and
+            // on some platforms it changes only after the request completes
+            m_InputHandler->updateMouseModeForWindow();
 
             presence.runCallbacks();
 

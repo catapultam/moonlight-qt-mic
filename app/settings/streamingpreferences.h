@@ -127,6 +127,14 @@ public:
     };
     Q_ENUM(CaptureSysKeysMode);
 
+    enum MouseMode
+    {
+        MM_OFF,  // Game mouse
+        MM_ON,   // Remote desktop mouse
+        MM_AUTO, // Remote desktop mouse in a window, game mouse in full-screen
+    };
+    Q_ENUM(MouseMode);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -139,7 +147,7 @@ public:
     Q_PROPERTY(bool multiController MEMBER multiController NOTIFY multiControllerChanged)
     Q_PROPERTY(bool enableMdns MEMBER enableMdns NOTIFY enableMdnsChanged)
     Q_PROPERTY(bool quitAppAfter MEMBER quitAppAfter NOTIFY quitAppAfterChanged)
-    Q_PROPERTY(bool absoluteMouseMode MEMBER absoluteMouseMode NOTIFY absoluteMouseModeChanged)
+    Q_PROPERTY(MouseMode mouseMode MEMBER mouseMode NOTIFY mouseModeChanged)
     Q_PROPERTY(bool absoluteTouchMode MEMBER absoluteTouchMode NOTIFY absoluteTouchModeChanged)
     Q_PROPERTY(bool framePacing MEMBER framePacing NOTIFY framePacingChanged)
     Q_PROPERTY(bool connectionWarnings MEMBER connectionWarnings NOTIFY connectionWarningsChanged)
@@ -196,7 +204,7 @@ public:
     bool multiController;
     bool enableMdns;
     bool quitAppAfter;
-    bool absoluteMouseMode;
+    MouseMode mouseMode;
     bool absoluteTouchMode;
     bool framePacing;
     bool connectionWarnings;
@@ -239,7 +247,7 @@ signals:
     void unsupportedFpsChanged();
     void enableMdnsChanged();
     void quitAppAfterChanged();
-    void absoluteMouseModeChanged();
+    void mouseModeChanged();
     void absoluteTouchModeChanged();
     void audioConfigChanged();
     void videoCodecConfigChanged();
