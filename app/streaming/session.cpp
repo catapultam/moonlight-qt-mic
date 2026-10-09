@@ -351,6 +351,12 @@ void Session::clearPendingResize()
 {
     m_PendingResize.clear();
 
+    SDL_LockMutex(m_DecoderLock);
+    if (m_VideoDecoder != nullptr) {
+        m_VideoDecoder->setExpectedFrameSize(0, 0);
+    }
+    SDL_UnlockMutex(m_DecoderLock);
+
     if (m_ResizeTimeoutTimer != 0) {
         SDL_RemoveTimer(m_ResizeTimeoutTimer);
         m_ResizeTimeoutTimer = 0;
@@ -404,11 +410,43 @@ void Session::requestLiveResize()
     }
 
     m_PendingResize.begin(width, height, requestId);
+
+    SDL_LockMutex(m_DecoderLock);
+    if (m_VideoDecoder != nullptr) {
+        m_VideoDecoder->setExpectedFrameSize(width, height);
+    }
+    SDL_UnlockMutex(m_DecoderLock);
+
     m_ResizeTimeoutTimer = SDL_AddTimer(RESIZE_TIMEOUT_MS, resizeTimeoutTimerCallback, (void*)(uintptr_t)requestId);
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Requested live resize from %dx%d to %dx%d (request %u)",
                 m_ActiveVideoWidth, m_ActiveVideoHeight, width, height, requestId);
+}
+
+void Session::applyStreamSize(int width, int height)
+{
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Video stream is now %dx%d", width, height);
+
+    if (m_PendingResize.active && !m_PendingResize.matchesFrame(width, height)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Stream size %dx%d differs from the requested %dx%d",
+                    width, height, m_PendingResize.width, m_PendingResize.height);
+    }
+    clearPendingResize();
+
+    // These feed chooseDecoder() in the reset handler and the mouse scaling
+    m_ActiveVideoWidth = width;
+    m_ActiveVideoHeight = height;
+    m_StreamConfig.width = width;
+    m_StreamConfig.height = height;
+    m_InputHandler->setStreamSize(width, height);
+
+    // Recreate the decoder and renderer at the new size. The handler also
+    // requests an IDR frame and sets the HDR mode again.
+    SDL_Event event = {};
+    event.type = SDL_RENDER_DEVICE_RESET;
+    SDL_PushEvent(&event);
 }
 
 
@@ -2249,6 +2287,9 @@ void Session::exec()
             case SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS:
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
+                break;
+            case SDL_CODE_STREAM_SIZE_CHANGED:
+                applyStreamSize((int)(uintptr_t)event.user.data1, (int)(uintptr_t)event.user.data2);
                 break;
             case SDL_CODE_RESIZE_REFUSED: {
                 uint32_t requestId = (uint32_t)(uintptr_t)event.user.data1;

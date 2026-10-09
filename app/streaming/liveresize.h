@@ -100,4 +100,32 @@ struct PendingRequest {
     }
 };
 
+enum class FrameSizeClass {
+    Original,   // the size the decoder was created with
+    Padding,    // encoder padding to crop (larger by less than 64 in both dimensions)
+    NewSize,    // the stream size changed; recreate the decoder
+};
+
+// Classifies the size of a decoded frame. expectedW/H is the size of a pending
+// resize request, or 0 when none is pending. originalW/H is the size the
+// decoder was created with.
+inline FrameSizeClass classifyFrameSize(int frameW, int frameH, int expectedW, int expectedH, int originalW, int originalH)
+{
+    if (frameW == originalW && frameH == originalH) {
+        return FrameSizeClass::Original;
+    }
+
+    if (expectedW != 0 && frameW == expectedW && frameH == expectedH) {
+        return FrameSizeClass::NewSize;
+    }
+
+    int cropWidth = frameW - originalW;
+    int cropHeight = frameH - originalH;
+    if (cropWidth >= 0 && cropWidth < 64 && cropHeight >= 0 && cropHeight < 64) {
+        return FrameSizeClass::Padding;
+    }
+
+    return FrameSizeClass::NewSize;
+}
+
 }

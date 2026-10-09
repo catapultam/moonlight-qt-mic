@@ -6,6 +6,10 @@
 
 #define SDL_CODE_FRAME_READY 0
 
+// Pushed by a decoder when a frame arrives at a new stream size.
+// data1 = width, data2 = height. The session recreates the decoder.
+#define SDL_CODE_STREAM_SIZE_CHANGED 106
+
 #define MAX_SLICES 4
 
 typedef struct _VIDEO_STATS {
@@ -77,4 +81,8 @@ public:
     virtual void renderFrameOnMainThread() = 0;
     virtual void setHdrMode(bool enabled) = 0;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) = 0;
+
+    // Tells the decoder which frame size a pending live resize request asked for,
+    // so that a frame of that size is not taken for encoder padding. 0, 0 clears it.
+    virtual void setExpectedFrameSize(int width, int height) { (void)width; (void)height; }
 };

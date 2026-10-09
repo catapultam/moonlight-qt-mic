@@ -2,6 +2,7 @@
 #include "ffmpeg.h"
 #include "utils.h"
 #include "streaming/session.h"
+#include "streaming/liveresize.h"
 
 #include <h264_stream.h>
 
@@ -83,6 +84,12 @@ void FFmpegVideoDecoder::setHdrMode(bool enabled)
 bool FFmpegVideoDecoder::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
 {
     return m_FrontendRenderer->notifyWindowChanged(info);
+}
+
+void FFmpegVideoDecoder::setExpectedFrameSize(int width, int height)
+{
+    m_ExpectedVideoWidth = width;
+    m_ExpectedVideoHeight = height;
 }
 
 int FFmpegVideoDecoder::getDecoderCapabilities()
@@ -232,6 +239,8 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_FramesOut(0),
       m_LastFrameNumber(0),
       m_StreamFps(0),
+      m_ExpectedVideoWidth(0),
+      m_ExpectedVideoHeight(0),
       m_VideoFormat(0),
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly),
@@ -1924,11 +1933,15 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // to crop it off. If we find our received frame looks close to our requested
                     // size (where "close" is arbitrarily defined as "within 64 pixels") then just
                     // crop the video to our requested size instead.
-                    if (frame->width != m_OriginalVideoWidth || frame->height != m_OriginalVideoHeight) {
+                    LiveResize::FrameSizeClass sizeClass =
+                        LiveResize::classifyFrameSize(frame->width, frame->height,
+                                                      m_ExpectedVideoWidth.load(), m_ExpectedVideoHeight.load(),
+                                                      m_OriginalVideoWidth, m_OriginalVideoHeight);
+                    if (sizeClass == LiveResize::FrameSizeClass::Padding) {
                         int cropWidth = frame->width - m_OriginalVideoWidth;
                         int cropHeight = frame->height - m_OriginalVideoHeight;
 
-                        if (cropWidth >= 0 && cropWidth < 64 && cropHeight >= 0 && cropHeight < 64) {
+                        {
                             if (m_FramesOut == 1) {
                                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                             "Cropping incoming frames from (%d, %d) to (%d, %d)",
@@ -2038,8 +2051,29 @@ void FFmpegVideoDecoder::decoderThreadProc()
 
                     m_ActiveWndVideoStats.decodedFrames++;
 
-                    // Queue the frame for rendering (or render now if pacer is disabled)
-                    m_Pacer->submitFrame(frame);
+                    if (sizeClass == LiveResize::FrameSizeClass::NewSize) {
+                        // The stream size changed. The renderer was created for the old
+                        // size, so drop this frame and let the session recreate us.
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                                    "Stream size changed from %dx%d to %dx%d",
+                                    m_OriginalVideoWidth, m_OriginalVideoHeight,
+                                    frame->width, frame->height);
+
+                        SDL_Event event = {};
+                        event.type = SDL_USEREVENT;
+                        event.user.code = SDL_CODE_STREAM_SIZE_CHANGED;
+                        event.user.data1 = (void*)(uintptr_t)frame->width;
+                        event.user.data2 = (void*)(uintptr_t)frame->height;
+                        SDL_PushEvent(&event);
+
+                        // Don't consume any additional data
+                        SDL_AtomicSet(&m_DecoderThreadShouldQuit, 1);
+                        av_frame_free(&frame);
+                    }
+                    else {
+                        // Queue the frame for rendering (or render now if pacer is disabled)
+                        m_Pacer->submitFrame(frame);
+                    }
                 }
                 else if (err == AVERROR(EAGAIN)) {
                     VIDEO_FRAME_HANDLE handle;

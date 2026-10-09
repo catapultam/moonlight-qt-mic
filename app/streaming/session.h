@@ -247,6 +247,9 @@ private:
     // Forgets the pending request and stops its timeout
     void clearPendingResize();
 
+    // Takes the new stream size from the decoder and recreates the decoder
+    void applyStreamSize(int width, int height);
+
     static
     int arInit(int audioConfiguration,
                const POPUS_MULTISTREAM_CONFIGURATION opusConfig,

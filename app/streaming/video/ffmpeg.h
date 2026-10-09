@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <QQueue>
 #include <set>
@@ -29,6 +30,7 @@ public:
     virtual void renderFrameOnMainThread() override;
     virtual void setHdrMode(bool enabled) override;
     virtual bool notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info) override;
+    virtual void setExpectedFrameSize(int width, int height) override;
 
     virtual IFFmpegRenderer* getBackendRenderer();
 
@@ -126,6 +128,9 @@ private:
     int m_StreamFps;
     int m_OriginalVideoWidth;
     int m_OriginalVideoHeight;
+    // Set by setExpectedFrameSize() from the main thread, read by the decoder thread
+    std::atomic<int> m_ExpectedVideoWidth;
+    std::atomic<int> m_ExpectedVideoHeight;
     int m_VideoFormat;
     bool m_NeedsSpsFixup;
     bool m_TestOnly;

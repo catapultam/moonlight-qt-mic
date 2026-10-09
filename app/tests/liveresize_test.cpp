@@ -64,11 +64,37 @@ static void testReasonText()
     assert(strcmp(LiveResize::reasonText(42, 0, 0, text, sizeof(text)), "Host refused the resize (reason 42)") == 0);
 }
 
+static void testClassifyFrameSize()
+{
+    using LiveResize::FrameSizeClass;
+    using LiveResize::classifyFrameSize;
+
+    // Same size as the decoder was created with
+    assert(classifyFrameSize(2560, 1600, 0, 0, 2560, 1600) == FrameSizeClass::Original);
+
+    // Encoder padding: larger by less than 64 in both dimensions, no request pending
+    assert(classifyFrameSize(2576, 1616, 0, 0, 2560, 1600) == FrameSizeClass::Padding);
+
+    // The requested size wins over the padding rule
+    assert(classifyFrameSize(2570, 1610, 2570, 1610, 2560, 1600) == FrameSizeClass::NewSize);
+
+    // A smaller frame is never padding
+    assert(classifyFrameSize(2536, 1390, 2536, 1390, 2560, 1600) == FrameSizeClass::NewSize);
+
+    // Review Focus 3: the host changed the size on its own, no request pending
+    assert(classifyFrameSize(2536, 1390, 0, 0, 2560, 1600) == FrameSizeClass::NewSize);
+    assert(classifyFrameSize(2624, 1664, 0, 0, 2560, 1600) == FrameSizeClass::NewSize);
+
+    // The expected size does not match this frame, so the old rules apply
+    assert(classifyFrameSize(2576, 1616, 3840, 2160, 2560, 1600) == FrameSizeClass::Padding);
+}
+
 int main()
 {
     testRoundDownEven();
     testPendingRequest();
     testReasonText();
+    testClassifyFrameSize();
     puts("liveresize_test: all checks passed");
     return 0;
 }
