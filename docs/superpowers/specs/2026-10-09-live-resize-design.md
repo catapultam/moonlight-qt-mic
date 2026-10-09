@@ -29,7 +29,7 @@ Research clones (read-only) are in `/tmp/live-resize/apollo-microphone`
 |---|----------|--------|
 | D1 | New control message `RESIZE_REQUEST` (client to host) and `RESIZE_REFUSED` (host to client) on the existing encrypted control stream. | Both ends already encrypt and dispatch control messages. No new socket. |
 | D2 | The host advertises support with the SDP attribute `a=x-ss-general.liveResize:1` in the RTSP DESCRIBE reply. The client enables the hotkey only when it sees this attribute. | Stock hosts drop unknown control messages silently (`control_server_t::call` logs "type [Unknown]"). The user must get a clear message instead. |
-| D3 | The host changes the VDD with remove and re-add of the SudoVDA monitor. A plain mode change is tried first, but it only works for sizes that are already in the monitor mode list. See section 4.3. | The SudoVDA driver builds the mode list once when the monitor arrives. There is no IOCTL that adds a mode. |
+| D3 | The host changes the VDD with remove and re-add of the SudoVDA monitor. The host does not try a plain mode change first: it works only for sizes that are already in the monitor mode list (spike S1b). See section 4.3. | The SudoVDA driver builds the mode list once when the monitor arrives. There is no IOCTL that adds a mode. |
 | D4 | Size rule: round each dimension down to an even number. Keep the current fps and bitrate. Do nothing when the result equals the current stream size. | 4:2:0 encoders and D3D11 NV12 textures need even sizes. Apollo already masks odd sizes (`src/process.cpp:210`). |
 | D5 | The host replies only on refusal, with a reason code. The client shows the reason in the status overlay for 5 seconds. The client also shows a message when no new-size frame arrives in 10 seconds. | A success needs no message: the new frames are the confirmation. A timeout protects against a lost message. |
 | D6 | The client recreates its decoder and renderer when a decoded frame arrives at the requested size. It uses the existing recreate path (`SDL_RENDER_DEVICE_RESET` handling in `Session::execInternal`). | All renderers get a clean start at the new size. No per-renderer resize code. |
@@ -347,8 +347,9 @@ streams the display may resize it. Reviewers may decide to gate it behind
   `terminate` clears `vdd` under the lock, `vdd.valid` is false after the
   app stops.
 - The lock is held for up to about 2.5 s of name polling (about 1.26 s for
-  each of two adds) plus two mode changes. The mode changes call
-  `ChangeDisplaySettingsExW`, which has no time limit. `terminate` waits for
+  each of two adds) plus up to four mode changes: one or two after each add
+  (two when `config::video.isolated_virtual_display_option` is set). The
+  mode changes call `ChangeDisplaySettingsExW`, which has no time limit. `terminate` waits for
   the lock during this time.
 
 ### 4.7 headless_mode interaction
