@@ -207,8 +207,9 @@ function does not try it first.
    GUID and the same arguments that `proc_t::execute` used.
    `_launch_session` is private, so `proc_t` has a public struct `vdd`
    {valid, device_uuid, device_name, target_fps, guid} that `execute` fills
-   at launch and `terminate` clears. `createVirtualDisplay` polls up to
-   about 640 ms for the device name.
+   at launch and `terminate` clears. `createVirtualDisplay` polls for the
+   device name with sleeps of 20, 40, 80, 160, 320 and 640 ms, thus up to
+   about 1.26 s for each add.
 4. `VDISPLAY::changeDisplaySettings(name, w, h, target_fps)` and, when
    `config::video.isolated_virtual_display_option` is set,
    `changeDisplaySettings2(..., true)`, as `execute` does. After a re-add of
@@ -345,8 +346,10 @@ streams the display may resize it. Reviewers may decide to gate it behind
   `terminate()`, which locks `vdd_lock` again on the same thread. Because
   `terminate` clears `vdd` under the lock, `vdd.valid` is false after the
   app stops.
-- The lock is held for up to about 2 x 640 ms of name polling plus two mode
-  changes. `terminate` waits for the lock during this time.
+- The lock is held for up to about 2.5 s of name polling (about 1.26 s for
+  each of two adds) plus two mode changes. The mode changes call
+  `ChangeDisplaySettingsExW`, which has no time limit. `terminate` waits for
+  the lock during this time.
 
 ### 4.7 headless_mode interaction
 
