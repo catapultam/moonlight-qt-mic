@@ -292,6 +292,7 @@ private:
     std::atomic<int> m_PendingMicrophonePeak;
     double m_MicrophoneMonitorLevel;
     bool m_MicrophoneMonitorActive;
+    bool m_MicrophoneMonitorAudioInitialized;
     bool m_MicrophoneMonitorSignalDetected;
     QString m_MicrophoneMonitorStatus;
 };

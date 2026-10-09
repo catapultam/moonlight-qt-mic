@@ -12,6 +12,7 @@ MicrophoneCapture::MicrophoneCapture(QObject* parent)
     , m_Streaming(false)
     , m_StopEncoderThread(false)
     , m_Initialized(false)
+    , m_AudioInitialized(false)
     , m_Enabled(false)
     , m_FirstPacketLogged(false)
 {
@@ -36,6 +37,11 @@ MicrophoneCapture::~MicrophoneCapture()
         opus_encoder_destroy(m_Encoder);
         m_Encoder = nullptr;
     }
+
+    if (m_AudioInitialized) {
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        m_AudioInitialized = false;
+    }
 }
 
 bool MicrophoneCapture::initialize(const std::string& deviceName)
@@ -44,11 +50,15 @@ bool MicrophoneCapture::initialize(const std::string& deviceName)
         return true;
     }
 
-    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "SDL_InitSubSystem(SDL_INIT_AUDIO) failed for microphone capture: %s",
-                    SDL_GetError());
-        return false;
+    // This reference is released in the destructor
+    if (!m_AudioInitialized) {
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "SDL_InitSubSystem(SDL_INIT_AUDIO) failed for microphone capture: %s",
+                        SDL_GetError());
+            return false;
+        }
+        m_AudioInitialized = true;
     }
 
     int opusError = OPUS_OK;

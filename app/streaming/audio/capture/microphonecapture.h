@@ -42,6 +42,7 @@ private:
     std::atomic_bool m_Streaming;
     std::atomic_bool m_StopEncoderThread;
     bool m_Initialized;
+    bool m_AudioInitialized;
     bool m_Enabled;
     bool m_FirstPacketLogged;
     std::mutex m_BufferMutex;

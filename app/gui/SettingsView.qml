@@ -1035,6 +1035,7 @@ Flickable {
 
                 Label {
                     width: parent.width
+                    visible: enableMicrophoneCheck.checked
                     text: qsTr("Microphone input preview")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
@@ -1042,6 +1043,7 @@ Flickable {
 
                 Rectangle {
                     width: parent.width
+                    visible: enableMicrophoneCheck.checked
                     height: 16
                     radius: 8
                     color: "#202733"
@@ -1061,6 +1063,7 @@ Flickable {
 
                 Label {
                     width: parent.width
+                    visible: enableMicrophoneCheck.checked
                     wrapMode: Text.Wrap
                     font.pointSize: 10
                     text: StreamingPreferences.microphoneMonitorStatus + "\n" +

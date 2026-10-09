@@ -72,6 +72,7 @@ StreamingPreferences::StreamingPreferences(QQmlEngine *qmlEngine)
     , m_PendingMicrophonePeak(0)
     , m_MicrophoneMonitorLevel(0.0)
     , m_MicrophoneMonitorActive(false)
+    , m_MicrophoneMonitorAudioInitialized(false)
     , m_MicrophoneMonitorSignalDetected(false)
 {
     m_MicrophoneMonitorTimer->setInterval(50);
@@ -485,9 +486,19 @@ void StreamingPreferences::microphoneMonitorCallback(void* userdata, Uint8* stre
 
 bool StreamingPreferences::startMicrophoneMonitor()
 {
-    if (SDL_WasInit(SDL_INIT_AUDIO) == 0 && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
-        setMicrophoneMonitorStatus(tr("Microphone preview unavailable: SDL audio init failed"));
+    // Do not open the microphone unless the user enabled microphone streaming
+    if (!enableMicrophone) {
+        setMicrophoneMonitorStatus(tr("Microphone preview inactive"));
         return false;
+    }
+
+    // This reference is released in stopMicrophoneMonitor()
+    if (!m_MicrophoneMonitorAudioInitialized) {
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+            setMicrophoneMonitorStatus(tr("Microphone preview unavailable: SDL audio init failed"));
+            return false;
+        }
+        m_MicrophoneMonitorAudioInitialized = true;
     }
 
     SDL_AudioSpec desired = {};
@@ -511,7 +522,7 @@ bool StreamingPreferences::startMicrophoneMonitor()
     }
 
     if (m_MicrophoneMonitorDeviceId == 0) {
-        setMicrophoneMonitorStatus(tr("Microphone preview unavailable: could not open the selected input"));
+        stopMicrophoneMonitor(tr("Microphone preview unavailable: could not open the selected input"));
         return false;
     }
 
@@ -556,6 +567,11 @@ void StreamingPreferences::stopMicrophoneMonitor(const QString& status)
         SDL_PauseAudioDevice(m_MicrophoneMonitorDeviceId, 1);
         SDL_CloseAudioDevice(m_MicrophoneMonitorDeviceId);
         m_MicrophoneMonitorDeviceId = 0;
+    }
+
+    if (m_MicrophoneMonitorAudioInitialized) {
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        m_MicrophoneMonitorAudioInitialized = false;
     }
 
     m_PendingMicrophonePeak.store(0, std::memory_order_release);
