@@ -31,6 +31,7 @@
 #define SDL_CODE_GAMECONTROLLER_SET_ADAPTIVE_TRIGGERS 105
 
 #include <openssl/rand.h>
+#include <openssl/sha.h>
 
 #include <QtEndian>
 #include <QCoreApplication>
@@ -1825,6 +1826,23 @@ void Session::exec()
     }
 
     if (m_Preferences->enableMicrophone) {
+        if (qEnvironmentVariableIsSet("MOONLIGHT_MIC_DEBUG")) {
+            // Print the values that the host prints when it cannot decrypt, so
+            // that the two logs can be compared. The key is only a fingerprint.
+            unsigned char digest[SHA256_DIGEST_LENGTH];
+            uint32_t riKeyId;
+
+            SHA256(reinterpret_cast<const unsigned char*>(m_StreamConfig.remoteInputAesKey),
+                   sizeof(m_StreamConfig.remoteInputAesKey), digest);
+            memcpy(&riKeyId, m_StreamConfig.remoteInputAesIv, sizeof(riKeyId));
+            riKeyId = qFromBigEndian(riKeyId);
+
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Microphone diagnostics: avRiKeyId %u, key fingerprint %02X%02X%02X%02X, encryption %s",
+                        riKeyId, digest[0], digest[1], digest[2], digest[3],
+                        LiIsMicrophoneEncryptionEnabled() ? "on" : "off");
+        }
+
         if (LiIsMicrophoneStreamActive()) {
             if (!initializeMicrophoneCapture() || !m_MicrophoneCapture->start()) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
