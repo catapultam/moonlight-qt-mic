@@ -128,9 +128,18 @@ private:
     int m_StreamFps;
     int m_OriginalVideoWidth;
     int m_OriginalVideoHeight;
-    // Set by setExpectedFrameSize() from the main thread, read by the decoder thread
-    std::atomic<int> m_ExpectedVideoWidth;
-    std::atomic<int> m_ExpectedVideoHeight;
+    // Set by setExpectedFrameSize() from the main thread, read by the decoder thread.
+    // (width << 16) | height in one value, so that the decoder thread cannot read
+    // a width and a height of two different requests. 0 when no request is pending.
+    std::atomic<uint32_t> m_ExpectedVideoSize;
+    // Decoder thread only: the last value of m_ExpectedVideoSize that it saw, the
+    // size of the last decoded frame, and the size of the last frame before it saw
+    // the request (before the crop)
+    uint32_t m_SeenExpectedVideoSize;
+    int m_LastFrameWidth;
+    int m_LastFrameHeight;
+    int m_RequestFrameWidth;
+    int m_RequestFrameHeight;
     int m_VideoFormat;
     bool m_NeedsSpsFixup;
     bool m_TestOnly;

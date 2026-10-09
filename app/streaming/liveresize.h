@@ -124,8 +124,15 @@ inline bool isPaddedSize(int frameW, int frameH, int baseW, int baseH)
 // size or that size with encoder padding; then the new decoder crops the
 // padding. Else it is the frame size. For the other classes, the function
 // does not write streamW/H.
+//
+// requestFrameW/H is the size of the last frame that the decoder decoded
+// before it saw the request, or 0 when there was none. keyFrame is true when
+// this frame is a key frame. On an encoder that pads, an old frame can be a
+// padded size of the request. Thus a frame of requestFrameW x requestFrameH
+// is a frame of the new stream only when it is a key frame.
 inline FrameSizeClass classifyFrameSize(int frameW, int frameH, int expectedW, int expectedH, int originalW, int originalH,
-                                        int* streamW = nullptr, int* streamH = nullptr)
+                                        int* streamW = nullptr, int* streamH = nullptr,
+                                        int requestFrameW = 0, int requestFrameH = 0, bool keyFrame = false)
 {
     if (frameW == originalW && frameH == originalH) {
         return FrameSizeClass::Original;
@@ -133,7 +140,9 @@ inline FrameSizeClass classifyFrameSize(int frameW, int frameH, int expectedW, i
 
     // The requested size, with or without padding, wins over the padding rule
     // of the old size
-    if (expectedW != 0 && isPaddedSize(frameW, frameH, expectedW, expectedH)) {
+    bool sameSizeAsOldFrame = frameW == requestFrameW && frameH == requestFrameH;
+    if (expectedW != 0 && isPaddedSize(frameW, frameH, expectedW, expectedH) &&
+            (!sameSizeAsOldFrame || keyFrame)) {
         if (streamW != nullptr && streamH != nullptr) {
             *streamW = expectedW;
             *streamH = expectedH;

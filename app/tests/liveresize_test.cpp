@@ -130,6 +130,52 @@ static void testNewStreamSize()
     assert(width == -1 && height == -1);
 }
 
+static void testOldFrameAfterRequest()
+{
+    using LiveResize::FrameSizeClass;
+    using LiveResize::classifyFrameSize;
+    int width, height;
+
+    // The stream is 1920x1080 and the encoder sends 1920x1088. The last frame
+    // before the request was 1920x1088. The request is 1900x1060.
+
+    // An old frame (same coded size, not a key frame) is still padding
+    width = height = -1;
+    assert(classifyFrameSize(1920, 1088, 1900, 1060, 1920, 1080, &width, &height,
+                             1920, 1088, false) == FrameSizeClass::Padding);
+    assert(width == -1 && height == -1);
+
+    // A key frame of the new stream with the same coded size is the new size
+    width = height = -1;
+    assert(classifyFrameSize(1920, 1088, 1900, 1060, 1920, 1080, &width, &height,
+                             1920, 1088, true) == FrameSizeClass::NewSize);
+    assert(width == 1900 && height == 1060);
+
+    // A frame of a different coded size is the new size without a key frame
+    width = height = -1;
+    assert(classifyFrameSize(1904, 1072, 1900, 1060, 1920, 1080, &width, &height,
+                             1920, 1088, false) == FrameSizeClass::NewSize);
+    assert(width == 1900 && height == 1060);
+
+    // The request equals the old coded size exactly: an old frame is still padding
+    width = height = -1;
+    assert(classifyFrameSize(1920, 1088, 1920, 1088, 1920, 1080, &width, &height,
+                             1920, 1088, false) == FrameSizeClass::Padding);
+    assert(width == -1 && height == -1);
+
+    // The same with a key frame after the request: the new size
+    width = height = -1;
+    assert(classifyFrameSize(1920, 1088, 1920, 1088, 1920, 1080, &width, &height,
+                             1920, 1088, true) == FrameSizeClass::NewSize);
+    assert(width == 1920 && height == 1088);
+
+    // No frame before the request (0x0): the frame size differs, so the new size
+    width = height = -1;
+    assert(classifyFrameSize(1920, 1088, 1900, 1060, 1920, 1080, &width, &height,
+                             0, 0, false) == FrameSizeClass::NewSize);
+    assert(width == 1900 && height == 1060);
+}
+
 int main()
 {
     testRoundDownEven();
@@ -137,6 +183,7 @@ int main()
     testReasonText();
     testClassifyFrameSize();
     testNewStreamSize();
+    testOldFrameAfterRequest();
     puts("liveresize_test: all checks passed");
     return 0;
 }

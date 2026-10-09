@@ -88,8 +88,8 @@ bool FFmpegVideoDecoder::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
 
 void FFmpegVideoDecoder::setExpectedFrameSize(int width, int height)
 {
-    m_ExpectedVideoWidth = width;
-    m_ExpectedVideoHeight = height;
+    // The protocol sends the size as two 16-bit values
+    m_ExpectedVideoSize = ((uint32_t)(width & 0xFFFF) << 16) | (uint32_t)(height & 0xFFFF);
 }
 
 int FFmpegVideoDecoder::getDecoderCapabilities()
@@ -239,8 +239,12 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_FramesOut(0),
       m_LastFrameNumber(0),
       m_StreamFps(0),
-      m_ExpectedVideoWidth(0),
-      m_ExpectedVideoHeight(0),
+      m_ExpectedVideoSize(0),
+      m_SeenExpectedVideoSize(0),
+      m_LastFrameWidth(0),
+      m_LastFrameHeight(0),
+      m_RequestFrameWidth(0),
+      m_RequestFrameHeight(0),
       m_VideoFormat(0),
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly),
@@ -1933,12 +1937,30 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // to crop it off. If we find our received frame looks close to our requested
                     // size (where "close" is arbitrarily defined as "within 64 pixels") then just
                     // crop the video to our requested size instead.
+                    // When a new request comes, keep the size of the last frame before it.
+                    // On an encoder that pads, old frames can be a padded size of the request.
+                    uint32_t expectedSize = m_ExpectedVideoSize.load();
+                    if (expectedSize != m_SeenExpectedVideoSize) {
+                        m_SeenExpectedVideoSize = expectedSize;
+                        m_RequestFrameWidth = m_LastFrameWidth;
+                        m_RequestFrameHeight = m_LastFrameHeight;
+                    }
+                    m_LastFrameWidth = frame->width;
+                    m_LastFrameHeight = frame->height;
+
+#ifdef AV_FRAME_FLAG_KEY
+                    bool keyFrame = (frame->flags & AV_FRAME_FLAG_KEY) != 0;
+#else
+                    bool keyFrame = frame->key_frame != 0;
+#endif
+
                     int newStreamWidth = 0, newStreamHeight = 0;
                     LiveResize::FrameSizeClass sizeClass =
                         LiveResize::classifyFrameSize(frame->width, frame->height,
-                                                      m_ExpectedVideoWidth.load(), m_ExpectedVideoHeight.load(),
+                                                      (int)(expectedSize >> 16), (int)(expectedSize & 0xFFFF),
                                                       m_OriginalVideoWidth, m_OriginalVideoHeight,
-                                                      &newStreamWidth, &newStreamHeight);
+                                                      &newStreamWidth, &newStreamHeight,
+                                                      m_RequestFrameWidth, m_RequestFrameHeight, keyFrame);
                     if (sizeClass == LiveResize::FrameSizeClass::Padding) {
                         int cropWidth = frame->width - m_OriginalVideoWidth;
                         int cropHeight = frame->height - m_OriginalVideoHeight;
