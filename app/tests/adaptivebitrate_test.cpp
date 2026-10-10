@@ -246,6 +246,76 @@ static void testBusyStreamDelayDecreases()
     assert(d.reason == Reason::Delay && d.targetKbps == 36000);
 }
 
+// Rule 3 at the app-limited guard: 39 % gives no decrease, 41 % gives a decrease
+static void testDelayAtAppLimit()
+{
+    for (int pct = 39; pct <= 41; pct += 2) {
+        Sim sim(40000);
+        sim.runStart();
+        sim.s.measuredMbps = 32.0 * pct / 100;
+        for (int i = 0; i < 12; i++) {
+            assert(!sim.step().send);
+        }
+        Decision d;
+        int steps = sim.stepUntilSend(d, 40, 0, 35);
+        if (pct == 39) {
+            assert(steps == -1 && sim.c.targetKbps() == 40000);
+        }
+        else {
+            assert(steps == 7 && d.reason == Reason::Delay && d.targetKbps == 36000);
+        }
+    }
+}
+
+// A busy stream (65 %) and then the capacity falls: the RTT rises, and the measured
+// value (a 2.5 s mean) falls to 20 % with sustained delay and no loss. The measured value of the last clean
+// tick keeps the delay rule on: a decrease.
+static void testCongestionCollapseDecreases()
+{
+    Sim sim(40000);
+    sim.runStart();
+    sim.s.measuredMbps = 32.0 * 0.65;
+    for (int i = 0; i < 12; i++) {
+        assert(!sim.step().send);
+    }
+    // The queue grows first: the RTT rises, then the 2.5 s mean falls
+    Decision d;
+    for (int i = 0; i < 3; i++) {
+        assert(!sim.step(0, 35).send);
+    }
+    sim.s.measuredMbps = 32.0 * 0.20;
+    assert(sim.stepUntilSend(d, 12, 0, 35) == 4);
+    assert(d.reason == Reason::Delay && d.targetKbps == 36000);
+}
+
+// Motion starts after a static period, and the RTT stays high: at most one delay
+// decrease (10 %), then the baseline follows the RTT
+static void testMotionStartAfterStatic()
+{
+    Sim sim(40000);
+    sim.runStart();
+    sim.s.measuredMbps = 32.0 * 0.10;
+    for (int i = 0; i < 40; i++) {
+        assert(!sim.step().send);
+    }
+    sim.s.measuredMbps = 32.0;
+    bool rebased = false;
+    int decreases = 0;
+    for (int i = 0; i < 80; i++) {
+        Decision x = sim.step(0, 35);
+        rebased = rebased || x.rebased;
+        if (x.send) {
+            assert(x.reason == Reason::Delay || x.reason == Reason::Increase);
+            if (x.reason == Reason::Delay) {
+                decreases++;
+            }
+            sim.sendAndAnswer(x);
+        }
+    }
+    assert(decreases == 1 && rebased);
+    assert(sim.c.minTargetKbps() == 36000);
+}
+
 // A static picture with FEC pressure: no decrease
 static void testStaticStreamFecNoDecrease()
 {
@@ -872,6 +942,9 @@ int main()
     testFecPressure();
     testStaticStreamDelayNoDecrease();
     testBusyStreamDelayDecreases();
+    testDelayAtAppLimit();
+    testCongestionCollapseDecreases();
+    testMotionStartAfterStatic();
     testStaticStreamFecNoDecrease();
     testStaticStreamLossDecreases();
     testRecovery();

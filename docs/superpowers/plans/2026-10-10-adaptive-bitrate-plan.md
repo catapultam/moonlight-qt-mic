@@ -3137,6 +3137,8 @@ Expected: FAIL with `streaming/adaptivebitrate.h: No such file or directory`.
 
 Create `app/streaming/adaptivebitrate.h`:
 
+Note: this is a historical copy. The code (`app/streaming/adaptivebitrate.h`) and the spec govern. For example, rule 3 now uses the app-limited guard.
+
 ```cpp
 #pragma once
 

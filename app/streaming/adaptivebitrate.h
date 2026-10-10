@@ -67,6 +67,10 @@ constexpr uint32_t FAILURE_MEMORY_MS = 60000;
 // than the frame rate; the CBR encoder undershoots), so a higher value blocks the
 // increase after the network recovers.
 constexpr uint32_t APP_LIMITED_PCT = 40;
+// Rule 3: for this time after a bad period starts, the app-limited test uses the larger of
+// the measured value and the measured value of the last clean tick. Congestion lowers the
+// measured value (a 2.5 s mean) of a busy stream; this must not hide the congestion.
+constexpr uint32_t APP_LIMITED_HOLD_MS = 5000;
 constexpr uint32_t DEAD_BAND_PCT = 3;
 constexpr uint32_t DEAD_BAND_MIN_KBPS = 250;       // also the smallest increase step (plan)
 constexpr uint32_t MIN_DEC_INTERVAL_MS = 1000;
@@ -323,15 +327,29 @@ public:
         d.rttMs = w[0].rttMeanMs;
         d.rttBaselineMs = baseline;
 
+        // The measured value for the app-limited test of rule 3
+        double guardMbps = sample.measuredMbps;
         if (w[0].lossy || w[0].delay || fecPressure) {
             m_LastBadMs = now;
+            if (!m_InBadPeriod) {
+                m_InBadPeriod = true;
+                m_BadPeriodStartMs = now;
+            }
+            if (now - m_BadPeriodStartMs < APP_LIMITED_HOLD_MS && m_CleanMeasuredMbps > guardMbps) {
+                guardMbps = m_CleanMeasuredMbps;
+            }
+        }
+        else if (m_Count >= FEC_TICKS) {
+            // A clean tick with full windows
+            m_InBadPeriod = false;
+            m_CleanMeasuredMbps = sample.measuredMbps;
         }
 
         const uint32_t floor = floorKbps();
         // The stream uses only a small part of the encoder value (a static picture). A lower
         // bitrate cannot fix delay or FEC pressure that this stream does not cause.
-        const bool notAppLimited = m_EncoderKbps > 0 &&
-                sample.measuredMbps * 1000.0 * 100 >= (double)APP_LIMITED_PCT * m_EncoderKbps;
+        const bool notAppLimited = aboveAppLimit(sample.measuredMbps);
+        const bool delayNotAppLimited = aboveAppLimit(guardMbps);
         const bool sustainedLoss = (lossyWindows >= 2 && lossyTicks >= LOSS_MIN_TICKS) || (w[0].heavy && w[0].delay);
         const bool sustainedDelay = w[0].delay && w[1].delay;
         uint32_t newKbps = m_Target;
@@ -353,7 +371,7 @@ public:
             reason = Reason::Loss;
             noteFailure(now);
         }
-        else if ((sustainedDelay || fecPressure) && notAppLimited) {
+        else if ((sustainedDelay || fecPressure) && delayNotAppLimited) {
             // Rule 3. A second delay decision while the RTT did not fall after the last
             // delay decrease: the added delay is not a queue that a lower bitrate drains.
             if (sustainedDelay && !fecPressure && m_HaveDelayCut && now - m_LastDelayCutMs < RTT_BASELINE_MS &&
@@ -723,6 +741,12 @@ private:
         addRtt(nowMs, rttMs);
     }
 
+    // The app-limited test (rules 3 and 5): measured >= APP_LIMITED_PCT % of the encoder value
+    bool aboveAppLimit(double measuredMbps) const
+    {
+        return m_EncoderKbps > 0 && measuredMbps * 1000.0 * 100 >= (double)APP_LIMITED_PCT * m_EncoderKbps;
+    }
+
     void noteFailure(uint64_t nowMs)
     {
         m_HaveFailure = true;
@@ -746,6 +770,9 @@ private:
     uint64_t m_SettleUntilMs = 0;
     uint64_t m_CleanSinceMs = 0;
     uint64_t m_LastBadMs = 0;
+    bool m_InBadPeriod = false;
+    uint64_t m_BadPeriodStartMs = 0;
+    double m_CleanMeasuredMbps = 0;
 
     bool m_Pending = false;
     uint32_t m_PendingId = 0;

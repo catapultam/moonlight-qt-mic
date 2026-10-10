@@ -331,6 +331,7 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `STABLE_MS` | 4000 | Clean time before an increase |
 | `NEAR_FAILURE_PCT` | 85 | "Near" means the target is >= 85 % of the last failure rate (memory of 60 s) |
 | `APP_LIMITED_PCT` | 40 | Increase (rule 5), and decrease on delay or FEC pressure (rule 3), only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %: in the end-to-end test a static desktop measured 0.1-1.3 Mbps with `encoder_kbps` at 30-50 Mbps (below 3 %). The end-to-end test with full motion measured only 63-75 % of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
+| `APP_LIMITED_HOLD_MS` | 5000 | Rule 3: for this time after a bad period starts, the app-limited test uses the larger of the measured bitrate and the measured bitrate of the last clean tick |
 | `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
 | `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
 | `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
@@ -362,7 +363,10 @@ Rules, in order, at each tick:
 3. Sustained delay or FEC pressure: the RTT shows delay in the last two 1 s
    windows, or FEC pressure in the 2 s window, and the measured bitrate is at
    least `APP_LIMITED_PCT` (40 %) of `encoder_kbps` (the same test as rule
-   5). Then `new = max(FLOOR, target * DEC_DELAY)`. Store `lastFailureKbps`.
+   5). For the first `APP_LIMITED_HOLD_MS` after a bad period starts, this
+   test uses the larger of the measured bitrate and the measured bitrate of
+   the last clean tick (no lossy window, no delay, no FEC pressure). Then
+   `new = max(FLOOR, target * DEC_DELAY)`. Store `lastFailureKbps`.
    If the stream is app-limited, these signals give no change, and rules 4
    and 5 do not run on this tick.
 4. An isolated burst (one lossy window or one delay window, and no rule 2 or
@@ -395,7 +399,19 @@ Mbps, `encoder_kbps` 30-50 Mbps) on a clean network had RTT samples of
 pressure from random loss also cut. The target fell from 64 to 10 Mbps in 2
 minutes. The next motion then started low and climbed for about 2 minutes.
 The loss rule (rule 2) does not use the guard: loss is a stronger signal,
-and the cut is limited by `MAX_CUT` and the measured bitrate.
+and the cut is limited by `MAX_CUT` and the measured bitrate. Thus the guard
+limits the drop on a static desktop, but does not remove it: in the same
+test the loss rule cut 24793 to 12396 kbps on one window with 16 % loss and
+RTT delay.
+Congestion on a busy stream: the measured bitrate is a 2.5 s mean, and
+congestion lowers it. When rule 3 fires, a busy stream can thus look
+app-limited. For this reason, rule 3 uses the measured bitrate of the last
+clean tick for the first `APP_LIMITED_HOLD_MS` of a bad period. A static
+desktop has a clean measured bitrate of about 1 Mbps, so it stays blocked.
+Rule 5 uses only the current measured bitrate.
+The guard is relative to `encoder_kbps`. Near the floor, a static picture
+can thus still be cut on delay or FEC pressure until `encoder_kbps` is
+about 2.5 times its static rate.
 Trade-off of 40 %: content at a constant rate R can probe up until the
 encoder value is about 2.5 R (with 70 % it was 1.43 R), up to the ceiling.
 The next full-motion scene can then go above what the network carries, and
@@ -955,8 +971,10 @@ with a fake clock:
    Wi-Fi stall): no change.
 5. Heavy loss with RTT rise in one window: a decrease.
 6. Delay only (RTT baseline + 20 ms for 2 s): decrease to 90 %. Also at
-   measured 60 % of the host encoder value. At measured 10 % (app-limited):
-   no change.
+   measured 60 % and 41 % of the host encoder value. At measured 10 % and
+   39 % (app-limited): no change. A busy stream (65 %) whose measured
+   bitrate falls to 20 % with the delay: a decrease. Motion after a static
+   period with a high RTT: one decrease at most, then the baseline follows.
 7. FEC pressure only: decrease to 90 %. At measured 10 % (app-limited): no
    change. Sustained loss at measured 10 %: a decrease.
 8. Recovery: after `STABLE_MS` with no loss and measured >= 40 %: increase
@@ -1055,7 +1073,7 @@ Steps:
 | R2 | `min_struct_version(NV_ENC_RECONFIGURE_PARAMS_VER)` gives a wrong version with the v11 API (H.264 and HEVC use API 11.0, `nvenc_base.cpp:103`). | S1 runs with H.264 and HEVC. Compare the struct version macros of SDK 11 and 12 in the submodule. |
 | R3 | Quality drops after a decrease, or the rate control overshoots after an increase (CBR with infinite GOP, `nvenc_base.cpp:237`). | Watch the frame size log after each change in S1. If the overshoot is large, cap the increase step lower. |
 | R4 | The controller oscillates between two values. | Dead band, minimum intervals, smaller steps near `lastFailureKbps`, settle times. Unit test 8.1 and manual steps 2 to 4. Log every decision. |
-| R5 | The controller lowers the bitrate on Wi-Fi stalls that a lower bitrate does not fix. | D8. Manual test at the remote site of the memory note, or `netem` with bursts. |
+| R5 | The controller lowers the bitrate on Wi-Fi stalls that a lower bitrate does not fix. | D8. Manual test at the remote site of the memory note, or `netem` with bursts. Accepted: constant random loss of about 3 % gives constant FEC pressure, and rule 3 lowers a busy stream step by step. Random loss lowers the bitrate by design. In the end-to-end test (run 2, 00:04:55-00:05:30) the target fell from 64 to 23 Mbps in 35 s with FEC 3.0-3.2 %, RTT 1 ms and no frame loss. |
 | R6 | An IDR frame after a restart or a resize looks like congestion (burst of packets, short loss). | Settle times (4.3). Unit test 2. |
 | R7 | The app-limited guard keeps a static desktop at a low target after congestion ends. The next motion then has a low bitrate until the controller climbs. | Accepted. The climb is 8 % each 4 s. If too slow: allow a jump to the last good target when the measured bitrate reaches it. Rule 3 uses the guard, so delay and FEC pressure on a static desktop do not lower the target (the end-to-end test fell from 64 to 10 Mbps in 2 minutes without it, 4.3). The loss rule can still lower it. With the 40 % guard, light constant motion can also probe up to about 2.5 times its rate (4.3). |
 | R8 | ENet RTT is smoothed and only updates on ACKs, so the delay signal lags. | The ping goes each 100 ms. The loss rules do not need RTT. Check the lag in S2. |
