@@ -1194,7 +1194,7 @@ limit of the network. Normal is the behavior of section 4.3.
 | Value | Slow | Normal | Fast |
 |-------|------|--------|------|
 | Increase step (`INC_STEP_PCT`) | 4 % | 8 % | 15 % |
-| Increase step near the last failure (`INC_STEP_NEAR_PCT`) | 2 % | 3 % | 5 % |
+| Increase step near the last failure (`INC_STEP_NEAR_PCT`) | 3 % | 3 % | 5 % |
 | Time between increases (`MIN_INC_INTERVAL_MS`) | 8 s | 4 s | 2 s |
 | Clean time before an increase (`STABLE_MS`) | 8 s | 4 s | 2 s |
 | Lossy windows for a loss cut (`LOSS_WINDOWS`) | 3 | 2 | 2 |
@@ -1218,8 +1218,7 @@ The setting does not change:
 History: the history holds 12 deltas (3 windows of 1 s). Slow needs 3
 windows, so the history does not change.
 
-Known limit of Slow: the near step (2 %) is smaller than the dead band
-(3 %, rule 6). When the target is 85 % or more of the last failure rate and
-above about 8.3 Mbps (where 3 % is more than 250 kbps), no increase goes
-until the failure memory (`FAILURE_MEMORY_MS`, 60 s) ends. A step to the
-ceiling still goes. The unit test `testSlowNearFailureDeadBand` shows this.
+Near step: the near step is not below `DEAD_BAND_PCT` (3 %) on any speed.
+A smaller step does not pass the dead band (rule 6), so the target would not
+climb near the last failure rate until the failure memory ends. Slow uses
+3 %, the same as Normal; it is slower by its 4 % step and its 8 s interval.

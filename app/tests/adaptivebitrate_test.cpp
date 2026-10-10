@@ -955,7 +955,7 @@ static void testTexts()
 static void testSpeedTuning()
 {
     const Tuning slow = tuningFor(Speed::Slow);
-    assert(slow.incStepPct == 4 && slow.incStepNearPct == 2);
+    assert(slow.incStepPct == 4 && slow.incStepNearPct == 3);
     assert(slow.incIntervalMs == 8000 && slow.stableMs == 8000);
     assert(slow.lossWindows == 3 && slow.lossMinTicks == 3 && slow.delayWindows == 3);
     assert(slow.fecRecoveredPct == 5 && slow.decIntervalMs == 2000);
@@ -1110,9 +1110,9 @@ static void testSpeedIncrease()
     }
 }
 
-// Spec 11: on Slow, the near step (2 %) is below the dead band (3 %). Near the last
-// failure rate, no increase goes until the failure memory (60 s) ends.
-static void testSlowNearFailureDeadBand()
+// Spec 11: on Slow, the target keeps climbing near the last failure rate:
+// 3 % steps (equal to the dead band), 8 s apart
+static void testSlowNearFailureClimb()
 {
     Sim sim(40000, true, Speed::Slow);
     sim.runStart();
@@ -1125,9 +1125,17 @@ static void testSlowNearFailureDeadBand()
         sim.sendAndAnswer(d);
     }
     assert(sim.c.targetKbps() == 35094);
-    assert(sim.stepUntilSend(d, 400) > 0 && d.reason == Reason::Increase);
-    assert(sim.s.nowMs - failureMs >= FAILURE_MEMORY_MS);
-    assert(d.targetKbps == 36497);  // 4 %: the failure memory ended
+    uint64_t lastMs = sim.s.nowMs;
+    assert(sim.stepUntilSend(d, 80) > 0 && d.reason == Reason::Increase);
+    assert(d.targetKbps == 36146);  // 3 %
+    assert(sim.s.nowMs - lastMs >= 8000);
+    assert(sim.s.nowMs - failureMs < FAILURE_MEMORY_MS);
+    sim.sendAndAnswer(d);
+    lastMs = sim.s.nowMs;
+    assert(sim.stepUntilSend(d, 80) > 0 && d.reason == Reason::Increase);
+    assert(d.targetKbps == 37230);  // 3 %
+    assert(sim.s.nowMs - lastMs >= 8000);
+    assert(sim.s.nowMs - failureMs < FAILURE_MEMORY_MS);
 }
 
 int main()
@@ -1184,7 +1192,7 @@ int main()
     testSlowDelay();
     testSlowHeavyLoss();
     testSpeedIncrease();
-    testSlowNearFailureDeadBand();
+    testSlowNearFailureClimb();
     puts("adaptivebitrate_test: all checks passed");
     return 0;
 }

@@ -125,7 +125,8 @@ constexpr Tuning tuningFor(Speed speed)
 {
     switch (speed) {
     case Speed::Slow:
-        return Tuning{4, 2, 8000, 8000, 3, LOSS_MIN_TICKS, 3, 5, 2000};
+        // The near step is not below DEAD_BAND_PCT: a smaller step does not pass the dead band
+        return Tuning{4, INC_STEP_NEAR_PCT, 8000, 8000, 3, LOSS_MIN_TICKS, 3, 5, 2000};
     case Speed::Fast:
         return Tuning{15, 5, 2000, 2000, LOSS_WINDOWS, 2, DELAY_WINDOWS, FEC_RECOVERED_PCT, MIN_DEC_INTERVAL_MS};
     default:
@@ -140,6 +141,10 @@ static_assert(tuningFor(Speed::Slow).lossWindows <= WINDOWS && tuningFor(Speed::
 static_assert(tuningFor(Speed::Fast).lossWindows <= WINDOWS && tuningFor(Speed::Fast).delayWindows <= WINDOWS,
               "the history holds WINDOWS windows");
 static_assert(LOSS_WINDOWS <= WINDOWS && DELAY_WINDOWS <= WINDOWS, "the history holds WINDOWS windows");
+// A near step below the dead band does not pass rule 6
+static_assert(tuningFor(Speed::Slow).incStepNearPct >= DEAD_BAND_PCT && tuningFor(Speed::Normal).incStepNearPct >= DEAD_BAND_PCT &&
+                      tuningFor(Speed::Fast).incStepNearPct >= DEAD_BAND_PCT,
+              "the near step must pass the dead band");
 
 // Cumulative values at one tick
 struct Sample {
