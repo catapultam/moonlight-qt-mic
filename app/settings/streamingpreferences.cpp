@@ -154,12 +154,12 @@ void StreamingPreferences::reload()
     unlockBitrate = settings.value(SER_UNLOCK_BITRATE, false).toBool();
     autoAdjustBitrate = settings.value(SER_AUTOADJUSTBITRATE, true).toBool();
     adaptiveBitrate = settings.value(SER_ADAPTIVEBITRATE, true).toBool();
-    adaptiveBitrateSpeed = static_cast<AdaptiveBitrateSpeed>(settings.value(SER_ADAPTIVEBITRATESPEED,
-                                                                            static_cast<int>(AdaptiveBitrateSpeed::ABS_NORMAL)).toInt());
-    if (adaptiveBitrateSpeed < ABS_SLOW || adaptiveBitrateSpeed > ABS_FAST) {
+    int abrSpeed = settings.value(SER_ADAPTIVEBITRATESPEED, static_cast<int>(ABS_NORMAL)).toInt();
+    if (abrSpeed < ABS_SLOW || abrSpeed > ABS_FAST) {
         // A value that is not known
-        adaptiveBitrateSpeed = ABS_NORMAL;
+        abrSpeed = ABS_NORMAL;
     }
+    adaptiveBitrateSpeed = static_cast<AdaptiveBitrateSpeed>(abrSpeed);
     enableVsync = settings.value(SER_VSYNC, true).toBool();
     gameOptimizations = settings.value(SER_GAMEOPTS, true).toBool();
     playAudioOnHost = settings.value(SER_HOSTAUDIO, false).toBool();

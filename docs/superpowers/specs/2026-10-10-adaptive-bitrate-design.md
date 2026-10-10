@@ -1218,7 +1218,9 @@ Pace of the changes:
   2.75 s.
 - Decreases: after a cut, the settle time clears the windows. A new cut
   needs full windows again (2 windows, or 3 on Slow). Thus a new cut comes
-  about 2.75 s (Normal, Fast) or 3.75 s (Slow) after the answer.
+  about 2.75 s (Normal, Fast) or 3.75 s (Slow) after the answer. A heavy
+  loss burst needs only one window, so its cut can come about 1.75 s after
+  the answer.
   `MIN_DEC_INTERVAL_MS` (1 s) is shorter than this, so it has no effect on
   any speed. The speed does not change it.
 
