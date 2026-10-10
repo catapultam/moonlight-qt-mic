@@ -34,6 +34,9 @@
 #define SDL_CODE_RESIZE_STATUS_TIMEOUT 109
 #define SDL_CODE_RESIZE_PUMP 110
 // SDL_CODE_FIRST_FRAME_DECODED is 111 (decoder.h)
+// Adaptive bitrate (adaptive bitrate spec 6.2)
+#define SDL_CODE_BITRATE_TICK 120
+#define SDL_CODE_BITRATE_STATUS 121
 
 // Time to wait for the first frame at the new size
 #define RESIZE_TIMEOUT_MS 10000
@@ -73,7 +76,8 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
     Session::clSetAdaptiveTriggers,
-    Session::clResizeRefused
+    Session::clResizeRefused,
+    Session::clBitrateStatus
 };
 
 Session* Session::s_ActiveSession;
@@ -200,8 +204,9 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
     switch (connectionStatus)
     {
     case CONN_STATUS_POOR:
+        // Spec 6.6 (U5): when the controller runs, the client lowers the bitrate itself
         s_ActiveSession->m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
-                                                            s_ActiveSession->m_StreamConfig.bitrate > 5000 ?
+                                                            (!s_ActiveSession->m_BitrateRunning.load() && s_ActiveSession->m_StreamConfig.bitrate > 5000) ?
                                                                 "Slow connection to PC\nReduce your bitrate" : "Poor connection to PC");
         s_ActiveSession->m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
         s_ActiveSession->m_StatusOverlayOwner = StatusOverlayOwner::Connection;
@@ -302,6 +307,31 @@ void Session::clResizeRefused(uint16_t width, uint16_t height, uint32_t requestI
     event.user.data1 = (void*)(uintptr_t)requestId;
     event.user.data2 = (void*)(uintptr_t)reason;
     SDL_PushEvent(&event);
+}
+
+void Session::clBitrateStatus(uint32_t requestId, uint32_t requestedKbps, uint32_t acceptedKbps, uint32_t encoderKbps, uint16_t status)
+{
+    // Runs on the async callback thread. The main thread owns the controller.
+    {
+        std::lock_guard<std::mutex> lock(s_ActiveSession->m_BitrateStatusLock);
+        s_ActiveSession->m_BitrateStatusQueue.push_back({requestId, requestedKbps, acceptedKbps, encoderKbps, status});
+    }
+
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_BITRATE_STATUS;
+    SDL_PushEvent(&event);
+}
+
+Uint32 Session::bitrateTickTimerCallback(Uint32 interval, void*)
+{
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_BITRATE_TICK;
+    SDL_PushEvent(&event);
+
+    // Repeats until the session removes it
+    return interval;
 }
 
 Uint32 Session::resizeTimeoutTimerCallback(Uint32, void* param)
@@ -551,11 +581,215 @@ void Session::applyStreamSize(int width, int height)
     m_StreamConfig.height = height;
     m_InputHandler->setStreamSize(width, height);
 
+    // Adaptive bitrate: the target for the new size (spec 4.6, D13)
+    updateBitrateCeiling();
+
     // Recreate the decoder and renderer at the new size. The handler also
     // requests an IDR frame and sets the HDR mode again.
     SDL_Event event = {};
     event.type = SDL_RENDER_DEVICE_RESET;
     SDL_PushEvent(&event);
+}
+
+uint32_t Session::calculateBitrateCeiling()
+{
+    // Spec 6.1 and D11: a manual bitrate is the ceiling and does not change on a live resize
+    if (!m_Preferences->autoAdjustBitrate) {
+        return (uint32_t)m_Preferences->bitrateKbps;
+    }
+
+    // The default for the current stream size and the negotiated chroma format (D10)
+    bool yuv444 = (m_ActiveVideoFormat & VIDEO_FORMAT_MASK_YUV444) != 0;
+    return (uint32_t)StreamingPreferences::getDefaultBitrate(m_ActiveVideoWidth, m_ActiveVideoHeight,
+                                                             m_ActiveVideoFrameRate, yuv444);
+}
+
+void Session::startAdaptiveBitrate()
+{
+    // Each new decoder sends SDL_CODE_FIRST_FRAME_DECODED. Only the first one of the
+    // session starts the controller (spec 4.4); a live resize sets its own settle time.
+    if (m_BitrateController.started()) {
+        return;
+    }
+
+    if (!LiIsDynamicBitrateSupported()) {
+        if (!m_BitrateUnsupportedLogged) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Adaptive bitrate: the host does not support bitrate changes; the bitrate stays at %d kbps",
+                        m_StreamConfig.bitrate);
+            m_BitrateUnsupportedLogged = true;
+        }
+        return;
+    }
+
+    uint32_t ceiling = calculateBitrateCeiling();
+    m_BitrateController.start(ceiling, SDL_GetTicks64(), m_Preferences->adaptiveBitrate);
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Adaptive bitrate: %s, limit %u kbps, stream start %d kbps",
+                m_Preferences->adaptiveBitrate ? "on" : "off (a live resize still sets the bitrate)",
+                ceiling, m_StreamConfig.bitrate);
+    publishBitrateState();
+
+    m_BitrateTickTimer = SDL_AddTimer(AdaptiveBitrate::TICK_MS, bitrateTickTimerCallback, nullptr);
+}
+
+void Session::bitrateTick()
+{
+    if (!m_BitrateController.running()) {
+        return;
+    }
+
+    uint64_t now = SDL_GetTicks64();
+    AdaptiveBitrate::Sample sample;
+    sample.nowMs = now;
+    LiGetVideoFrameCounters(&sample.framesFinished, &sample.framesLost);
+    const RTP_VIDEO_STATS* rtpStats = LiGetRTPVideoStats();
+    sample.packetsVideo = rtpStats->packetCountVideo;
+    sample.packetsFecRecovered = rtpStats->packetCountFecRecovered;
+    uint32_t rtt, rttVariance;
+    sample.rttMs = LiGetEstimatedRttInfo(&rtt, &rttVariance) ? rtt : 0;
+    sample.measuredMbps = m_BitrateTracker.GetAverageMbps();
+
+    // Spike S1 on the real path: count the key frames in about 1 s after an in-place change
+    if (m_KeyFrameCheckRequestId != 0 && now >= m_KeyFrameCheckMs) {
+        uint32_t keyFrames = m_KeyFrameCount.load() - m_KeyFrameMark;
+        if (keyFrames != 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Adaptive bitrate: %u key frames in about 1 s after the in-place change of request %u",
+                        keyFrames, m_KeyFrameCheckRequestId);
+        }
+        else {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Adaptive bitrate: no key frame after the in-place change of request %u",
+                        m_KeyFrameCheckRequestId);
+        }
+        m_KeyFrameCheckRequestId = 0;
+    }
+
+    AdaptiveBitrate::Decision decision = m_BitrateController.tick(sample);
+    if (decision.timedOut) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Adaptive bitrate: request %u got no answer in %u ms",
+                    decision.timedOutRequestId, AdaptiveBitrate::REQUEST_TIMEOUT_MS);
+    }
+    if (decision.stopped) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Adaptive bitrate: the host did not answer the first request %u times; adaptation is off for this session",
+                    AdaptiveBitrate::START_ATTEMPTS);
+    }
+    if (decision.rebased) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Adaptive bitrate: the RTT stays at %u ms after a decrease; this is now the RTT baseline",
+                    decision.rttBaselineMs);
+    }
+    if (decision.isolated) {
+        SDL_LogDebug(SDL_LOG_CATEGORY_APPLICATION,
+                     "Adaptive bitrate: isolated loss or delay, no change (loss %.1f%% %.1f%%, rtt %u/%u ms)",
+                     decision.lossPct[0], decision.lossPct[1], decision.rttMs, decision.rttBaselineMs);
+    }
+    if (decision.send) {
+        sendBitrateRequest(decision);
+    }
+    publishBitrateState();
+}
+
+void Session::sendBitrateRequest(const AdaptiveBitrate::Decision& decision)
+{
+    uint32_t requestId;
+    if (LiSendBitrateRequest(decision.targetKbps, &requestId) != 0) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Adaptive bitrate: could not send the request for %u kbps", decision.targetKbps);
+        return;
+    }
+    m_BitrateController.sent(decision, requestId, SDL_GetTicks64());
+
+    // A key frame of an in-place change can arrive before the answer: count from here
+    m_KeyFrameMark = m_KeyFrameCount.load();
+    m_KeyFrameMarkRequestId = requestId;
+
+    char line[256];
+    AdaptiveBitrate::formatDecision(decision, line, sizeof(line));
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "%s, request %u", line, requestId);
+}
+
+void Session::handleBitrateStatus()
+{
+    std::vector<BitrateStatusMessage> messages;
+    {
+        std::lock_guard<std::mutex> lock(m_BitrateStatusLock);
+        messages.swap(m_BitrateStatusQueue);
+    }
+
+    for (const BitrateStatusMessage& message : messages) {
+        uint64_t now = SDL_GetTicks64();
+        const char* name = AdaptiveBitrate::statusName(message.status);
+        switch (m_BitrateController.onStatus(message.requestId, message.status, message.requestedKbps,
+                                             message.acceptedKbps, message.encoderKbps, now)) {
+        case AdaptiveBitrate::StatusResult::Ignored:
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Adaptive bitrate: old answer %s for request %u ignored", name, message.requestId);
+            break;
+        case AdaptiveBitrate::StatusResult::Accepted:
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Adaptive bitrate: request %u %s, accepted %u kbps, host encoder %u kbps",
+                        message.requestId, name, message.acceptedKbps, message.encoderKbps);
+            if (message.status == AdaptiveBitrate::StatusApplied && message.requestId == m_KeyFrameMarkRequestId) {
+                m_KeyFrameCheckMs = now + 1000;
+                m_KeyFrameCheckRequestId = message.requestId;
+            }
+            break;
+        case AdaptiveBitrate::StatusResult::Stopped:
+            if (message.status == AdaptiveBitrate::StatusInvalid) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                             "Adaptive bitrate: the host answered INVALID for request %u (%u kbps); adaptation is off for this session",
+                             message.requestId, message.requestedKbps);
+            }
+            else {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Adaptive bitrate: the host answered %s; adaptation is off for this session", name);
+            }
+            break;
+        }
+    }
+    publishBitrateState();
+}
+
+void Session::updateBitrateCeiling()
+{
+    if (!m_BitrateController.running()) {
+        return;
+    }
+
+    // Spec 4.6. setCeiling() also clamps to the host cap (spec 4.5 and 6.1).
+    AdaptiveBitrate::Decision decision = m_BitrateController.setCeiling(calculateBitrateCeiling(), SDL_GetTicks64());
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "Adaptive bitrate: the limit for %dx%d is %u kbps",
+                m_ActiveVideoWidth, m_ActiveVideoHeight, m_BitrateController.ceilingKbps());
+    if (decision.send) {
+        // Spec 4.6: after the size change, not before; this bypasses rule 1 and the intervals
+        sendBitrateRequest(decision);
+    }
+    publishBitrateState();
+}
+
+void Session::publishBitrateState()
+{
+    m_BitrateTargetKbps = m_BitrateController.targetKbps();
+    m_BitrateCeilingKbps = m_BitrateController.ceilingKbps();
+    m_BitrateEncoderKbps = m_BitrateController.encoderKbps();
+    m_BitrateRunning = m_BitrateController.running() && m_BitrateController.adaptive();
+}
+
+int Session::formatBitrateStats(char* output, int length)
+{
+    uint32_t target = m_BitrateTargetKbps.load();
+    if (target == 0) {
+        // No controller: the stream keeps its start bitrate
+        target = (uint32_t)m_StreamConfig.bitrate;
+    }
+    return AdaptiveBitrate::formatOverlay(m_BitrateRunning.load(), target, m_BitrateCeilingKbps.load(),
+                                          m_BitrateEncoderKbps.load(), m_BitrateTracker.GetAverageMbps(),
+                                          output, (size_t)length);
 }
 
 
@@ -643,6 +877,12 @@ int Session::drSetup(int videoFormat, int width, int height, int frameRate, void
 
 int Session::drSubmitDecodeUnit(PDECODE_UNIT du)
 {
+    // Adaptive bitrate: the measured bitrate and the key frame count cover all decoders
+    s_ActiveSession->m_BitrateTracker.AddBytes(du->fullLength);
+    if (du->frameType == FRAME_TYPE_IDR) {
+        s_ActiveSession->m_KeyFrameCount++;
+    }
+
     // Use a lock since we'll be yanking this decoder out
     // from underneath the session when we initiate destruction.
     // We need to destroy the decoder on the main thread to satisfy
@@ -879,7 +1119,19 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_AutoResizeUnsupportedLogged(false),
       m_ResizeWaitingForFrame(false),
       m_StatusOverlayTimer(0),
-      m_StatusOverlayGeneration(0)
+      m_StatusOverlayGeneration(0),
+      m_BitrateTickTimer(0),
+      m_BitrateUnsupportedLogged(false),
+      m_BitrateTracker(10, 250),
+      m_BitrateTargetKbps(0),
+      m_BitrateCeilingKbps(0),
+      m_BitrateEncoderKbps(0),
+      m_BitrateRunning(false),
+      m_KeyFrameCount(0),
+      m_KeyFrameMark(0),
+      m_KeyFrameMarkRequestId(0),
+      m_KeyFrameCheckMs(0),
+      m_KeyFrameCheckRequestId(0)
 {
 }
 
@@ -2464,6 +2716,13 @@ void Session::exec()
                 // waits for it.
                 m_AutoResizeArmed = true;
                 pumpLiveResize();
+                startAdaptiveBitrate();
+                break;
+            case SDL_CODE_BITRATE_TICK:
+                bitrateTick();
+                break;
+            case SDL_CODE_BITRATE_STATUS:
+                handleBitrateStatus();
                 break;
             case SDL_CODE_RESIZE_STATUS_TIMEOUT:
                 if ((uint32_t)(uintptr_t)event.user.data1 != m_StatusOverlayGeneration) {
@@ -2781,6 +3040,18 @@ DispatchDeferredCleanup:
     if (m_StatusOverlayTimer != 0) {
         SDL_RemoveTimer(m_StatusOverlayTimer);
         m_StatusOverlayTimer = 0;
+    }
+
+    // Stop the adaptive bitrate timer before this object can go away
+    if (m_BitrateTickTimer != 0) {
+        SDL_RemoveTimer(m_BitrateTickTimer);
+        m_BitrateTickTimer = 0;
+    }
+    if (m_BitrateController.started()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Adaptive bitrate: target lowest %u, highest %u, mean %u kbps",
+                    m_BitrateController.minTargetKbps(), m_BitrateController.maxTargetKbps(),
+                    m_BitrateController.meanTargetKbps());
     }
 
     destroyMicrophoneCapture();

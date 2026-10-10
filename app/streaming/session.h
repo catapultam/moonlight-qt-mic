@@ -11,6 +11,12 @@
 #include "audio/renderers/renderer.h"
 #include "video/overlaymanager.h"
 #include "liveresize.h"
+#include "adaptivebitrate.h"
+#include "bandwidth.h"
+
+#include <atomic>
+#include <mutex>
+#include <vector>
 
 class MicrophoneCapture;
 
@@ -131,6 +137,10 @@ public:
     // Asks the host to make the stream equal to the window size (Ctrl+Alt+Shift+W)
     void requestLiveResize();
 
+    // Writes the bitrate line of the stats overlay (adaptive bitrate spec 6.5).
+    // Any thread may call it. Returns the snprintf() result.
+    int formatBitrateStats(char* output, int length);
+
 signals:
     void stageStarting(QString stage);
 
@@ -234,6 +244,28 @@ private:
 
     static
     void clResizeRefused(uint16_t width, uint16_t height, uint32_t requestId, uint16_t reason);
+
+    static
+    void clBitrateStatus(uint32_t requestId, uint32_t requestedKbps, uint32_t acceptedKbps, uint32_t encoderKbps, uint16_t status);
+
+    static
+    Uint32 bitrateTickTimerCallback(Uint32 interval, void* param);
+
+    // Adaptive bitrate (spec section 6). All run on the main thread.
+    // The target for the current stream size (spec 6.1)
+    uint32_t calculateBitrateCeiling();
+    // Starts the controller at the first decoded frame of the session (spec 4.4)
+    void startAdaptiveBitrate();
+    // One controller tick
+    void bitrateTick();
+    // Sends the request of a decision and logs it
+    void sendBitrateRequest(const AdaptiveBitrate::Decision& decision);
+    // Handles the answers that clBitrateStatus() queued
+    void handleBitrateStatus();
+    // A new ceiling after a live resize (spec 4.6)
+    void updateBitrateCeiling();
+    // Copies the controller state for the overlay and the connection warning
+    void publishBitrateState();
 
     static
     Uint32 resizeTimeoutTimerCallback(Uint32 interval, void* param);
@@ -355,6 +387,35 @@ private:
     SDL_TimerID m_StatusOverlayTimer;
     // Counts showResizeStatus() calls; a timer event from an older call is ignored
     uint32_t m_StatusOverlayGeneration;
+
+    // Adaptive bitrate (spec section 6). The controller and the timer belong to the main thread.
+    AdaptiveBitrate::Controller m_BitrateController;
+    SDL_TimerID m_BitrateTickTimer;
+    bool m_BitrateUnsupportedLogged;
+    // Received video bytes of the session; all decoders feed it in drSubmitDecodeUnit()
+    BandwidthTracker m_BitrateTracker;
+    // Copies of the controller state for other threads (overlay, connection warning)
+    std::atomic<uint32_t> m_BitrateTargetKbps;
+    std::atomic<uint32_t> m_BitrateCeilingKbps;
+    std::atomic<uint32_t> m_BitrateEncoderKbps;
+    std::atomic<bool> m_BitrateRunning;
+    // Key frames that arrived (spike S1 check on the real path: an in-place change must not make one)
+    std::atomic<uint32_t> m_KeyFrameCount;
+    uint32_t m_KeyFrameMark;
+    uint32_t m_KeyFrameMarkRequestId;
+    uint64_t m_KeyFrameCheckMs;
+    uint32_t m_KeyFrameCheckRequestId;
+    // Answers from clBitrateStatus() (async callback thread) for the main thread. A vector
+    // and not a heap object per SDL event: events left in the queue at the end would leak.
+    struct BitrateStatusMessage {
+        uint32_t requestId;
+        uint32_t requestedKbps;
+        uint32_t acceptedKbps;
+        uint32_t encoderKbps;
+        uint16_t status;
+    };
+    std::mutex m_BitrateStatusLock;
+    std::vector<BitrateStatusMessage> m_BitrateStatusQueue;
 
     static CONNECTION_LISTENER_CALLBACKS k_ConnCallbacks;
     static Session* s_ActiveSession;
