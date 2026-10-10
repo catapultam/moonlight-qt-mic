@@ -141,6 +141,7 @@ public:
     Q_PROPERTY(int bitrateKbps MEMBER bitrateKbps NOTIFY bitrateChanged)
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
+    Q_PROPERTY(bool adaptiveBitrate MEMBER adaptiveBitrate NOTIFY adaptiveBitrateChanged)
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
@@ -199,6 +200,9 @@ public:
     int bitrateKbps;
     bool unlockBitrate;
     bool autoAdjustBitrate;
+    // Lower the bitrate on network congestion and raise it again up to the
+    // target (adaptive bitrate spec D12). Not the same as autoAdjustBitrate.
+    bool adaptiveBitrate;
     bool enableVsync;
     bool gameOptimizations;
     bool playAudioOnHost;
@@ -242,6 +246,7 @@ signals:
     void bitrateChanged();
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();
+    void adaptiveBitrateChanged();
     void enableVsyncChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();

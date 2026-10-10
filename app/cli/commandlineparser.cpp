@@ -349,6 +349,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addToggleOption("vsync", "V-Sync");
     parser.addValueOption("fps", "FPS");
     parser.addValueOption("bitrate", "bitrate in Kbps");
+    parser.addToggleOption("adaptive-bitrate", "network adaptive bitrate");
     parser.addValueOption("packet-size", "video packet size");
     parser.addChoiceOption("display-mode", "display mode", m_WindowModeMap.keys());
     parser.addChoiceOption("audio-config", "audio config", m_AudioConfigMap.keys());
@@ -414,6 +415,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     // Resolve --bitrate option
     if (parser.isSet("bitrate")) {
         preferences->bitrateKbps = parser.getIntOption("bitrate");
+        // A bitrate from the command line is a manual value: it is the ceiling of the
+        // adaptive bitrate (spec D11), not the default for the stream size
+        preferences->autoAdjustBitrate = false;
         if (!inRange(preferences->bitrateKbps, 500, 500000)) {
             fprintf(stderr, "Warning: Bitrate is out of the supported range (500 - 500000 Kbps). Performance may suffer!\n");
         }
@@ -473,6 +477,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // Resolve --mute-on-focus-loss and --no-mute-on-focus-loss options
     preferences->muteOnFocusLoss = parser.getToggleOptionValue("mute-on-focus-loss", preferences->muteOnFocusLoss);
+
+    // Resolve --adaptive-bitrate and --no-adaptive-bitrate options
+    preferences->adaptiveBitrate = parser.getToggleOptionValue("adaptive-bitrate", preferences->adaptiveBitrate);
 
     // Resolve --background-gamepad and --no-background-gamepad options
     preferences->backgroundGamepad = parser.getToggleOptionValue("background-gamepad", preferences->backgroundGamepad);

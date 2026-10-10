@@ -729,6 +729,23 @@ Flickable {
                     }
                 }
 
+                CheckBox {
+                    id: adaptiveBitrateCheck
+                    hoverEnabled: true
+                    width: parent.width
+                    text: qsTr("Adapt bitrate to the network")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.adaptiveBitrate
+                    onCheckedChanged: {
+                        StreamingPreferences.adaptiveBitrate = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Lower the bitrate when the network is congested and raise it again up to the selected bitrate.")
+                }
+
                 Label {
                     width: parent.width
                     id: windowModeTitle
