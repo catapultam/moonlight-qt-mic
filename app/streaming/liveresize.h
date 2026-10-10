@@ -122,23 +122,43 @@ struct RefusalAction {
 // - A target that equals the stream size is dropped.
 // - An automatic target is sent only when it was stable for DebounceMs.
 //   A manual target (the hotkey) is sent at once.
-// - BUSY: retry the latest target after BusyRetryMs.
-// - Other refusals and timeouts: an automatic target of that size is not sent
-//   again. The text is shown once per (reason, size). A manual request is
-//   always sent and its refusal is always shown.
+// - BUSY and a send failure: retry the latest target with a back-off of 1 s,
+//   2 s, 4 s, then 8 s. After BackoffLimitMs of failures for the same target,
+//   stop. Then that size is held until the target changes.
+// - A manual request that gets BUSY or a send failure is retried only when
+//   autoMode is on, and then as an automatic request.
+// - Other refusals: an automatic target of that size is not sent for
+//   RefusalExpiryMs. A stream size change clears the list.
+// - Timeout: one automatic retry of the same size after TimeoutRetryMs. A
+//   second timeout of that size holds it until the target changes.
+// - The text of a refusal or timeout is shown once per (reason, size) in
+//   RefusalExpiryMs. A manual request always shows it.
+// - A refusal or timeout for another request id is ignored.
 class ResizeController {
 public:
     static constexpr uint32_t DebounceMs = 500;
-    static constexpr uint32_t BusyRetryMs = 1000;
+    static constexpr uint32_t BackoffFirstMs = 1000;
+    static constexpr uint32_t BackoffMaxMs = 8000;
+    static constexpr uint32_t BackoffLimitMs = 30000;
+    static constexpr uint32_t TimeoutRetryMs = 10000;
+    static constexpr uint32_t RefusalExpiryMs = 60000;
 
     PendingRequest inFlight;
     bool inFlightManual = false;
 
+    // True when the automatic mode setting is on
+    bool autoMode = false;
+
     // Puts a target in the next size slot.
     void setTarget(int w, int h, bool manual, uint32_t nowMs)
     {
+        if (m_Hold.active && (w != m_Hold.width || h != m_Hold.height)) {
+            // The target changed: the held size can be sent again
+            m_Hold.active = false;
+        }
+
         if (manual) {
-            // The user asked for it now: no debounce and no BUSY wait
+            // The user asked for it now: no debounce and no back-off wait
             m_RetryArmed = false;
         }
         else if (m_HasTarget && w == m_TargetWidth && h == m_TargetHeight) {
@@ -162,7 +182,8 @@ public:
         }
 
         if ((m_TargetWidth == streamW && m_TargetHeight == streamH) ||
-                (!m_TargetManual && isBlocked(m_TargetWidth, m_TargetHeight))) {
+                (!m_TargetManual && (isBlocked(m_TargetWidth, m_TargetHeight, nowMs) ||
+                                     isHeld(m_TargetWidth, m_TargetHeight)))) {
             m_HasTarget = false;
             return false;
         }
@@ -187,12 +208,22 @@ public:
         inFlightManual = manual;
     }
 
-    // The request in flight completed (a frame of the new size came), or the
-    // stream size changed in another way.
+    // The session could not send the request that takeSend() gave.
+    void sendFailed(int w, int h, bool manual, uint32_t nowMs)
+    {
+        retryWithBackoff(w, h, manual, nowMs);
+    }
+
+    // The stream size changed: the request in flight completed (a frame of the
+    // new size came), or the host changed the size.
     void ended()
     {
-        inFlight.clear();
-        inFlightManual = false;
+        clearInFlight();
+        m_Refusals.clear();
+        m_Hold.active = false;
+        m_Backoff.active = false;
+        m_TimeoutRetried.active = false;
+        m_TimeoutWait.active = false;
     }
 
     // The host refused the request with this id.
@@ -207,29 +238,27 @@ public:
         action.width = inFlight.width;
         action.height = inFlight.height;
         bool manual = inFlightManual;
-        ended();
+        clearInFlight();
 
         if (reason == ReasonBusy) {
-            // Retry the latest target. When the slot is empty, that is the refused size.
-            if (!m_HasTarget) {
-                m_HasTarget = true;
-                m_TargetWidth = action.width;
-                m_TargetHeight = action.height;
-                m_TargetManual = manual;
-                m_TargetSinceMs = nowMs - DebounceMs;
-            }
-            m_RetryArmed = true;
-            m_RetryAtMs = nowMs + BusyRetryMs;
+            retryWithBackoff(action.width, action.height, manual, nowMs);
             action.show = manual;
             return action;
         }
 
-        action.show = block(reason, action.width, action.height) || manual;
+        if (m_Backoff.active && m_Backoff.width == action.width && m_Backoff.height == action.height) {
+            m_Backoff.active = false;
+        }
+
+        // A target of the refused size in the slot is not sent again
+        dropTarget(action.width, action.height);
+
+        action.show = record(reason, action.width, action.height, nowMs) || manual;
         return action;
     }
 
     // The timeout of the request with this id expired.
-    RefusalAction timedOut(uint32_t id)
+    RefusalAction timedOut(uint32_t id, uint32_t nowMs)
     {
         RefusalAction action;
         if (!inFlight.matchesRefusal(id)) {
@@ -240,8 +269,28 @@ public:
         action.width = inFlight.width;
         action.height = inFlight.height;
         bool manual = inFlightManual;
-        ended();
-        action.show = block(ReasonTimeout, action.width, action.height) || manual;
+        clearInFlight();
+        action.show = record(ReasonTimeout, action.width, action.height, nowMs) || manual;
+
+        if (m_TimeoutRetried.matches(action.width, action.height)) {
+            // The second timeout of this size: hold it until the target changes
+            hold(action.width, action.height);
+        }
+        else if (manual && !autoMode) {
+            // Without the automatic mode, only the user sends a request again
+            dropTarget(action.width, action.height);
+        }
+        else {
+            // One automatic retry of the same size
+            m_TimeoutRetried = {true, action.width, action.height, 0};
+            m_TimeoutWait = {true, action.width, action.height, nowMs + TimeoutRetryMs};
+            if (!m_HasTarget) {
+                fillTarget(action.width, action.height, nowMs);
+            }
+            else if (m_TargetWidth == action.width && m_TargetHeight == action.height) {
+                m_TargetManual = false;
+            }
+        }
         return action;
     }
 
@@ -266,23 +315,121 @@ private:
         uint16_t reason;
         int width;
         int height;
+        uint32_t timeMs;
+    };
+
+    // A size with a time, used for the hold, the back-off and the timeout retry
+    struct SizeMark {
+        bool active;
+        int width;
+        int height;
+        uint32_t timeMs;
+
+        bool matches(int w, int h) const
+        {
+            return active && w == width && h == height;
+        }
     };
 
     // Keep the list small; the oldest entry goes first
     static constexpr size_t MaxRefusals = 64;
 
+    // Signed difference: correct when the tick count wraps
+    static int32_t diff(uint32_t a, uint32_t b)
+    {
+        return (int32_t)(a - b);
+    }
+
+    void clearInFlight()
+    {
+        inFlight.clear();
+        inFlightManual = false;
+    }
+
+    // Puts an automatic target in the slot that needs no debounce
+    void fillTarget(int w, int h, uint32_t nowMs)
+    {
+        m_HasTarget = true;
+        m_TargetWidth = w;
+        m_TargetHeight = h;
+        m_TargetManual = false;
+        m_TargetSinceMs = nowMs - DebounceMs;
+    }
+
+    void dropTarget(int w, int h)
+    {
+        if (m_HasTarget && m_TargetWidth == w && m_TargetHeight == h) {
+            m_HasTarget = false;
+        }
+    }
+
+    void hold(int w, int h)
+    {
+        m_Hold = {true, w, h, 0};
+        dropTarget(w, h);
+    }
+
+    bool isHeld(int w, int h) const
+    {
+        return m_Hold.matches(w, h);
+    }
+
+    // BUSY or a send failure of w x h
+    void retryWithBackoff(int w, int h, bool manual, uint32_t nowMs)
+    {
+        if (!m_HasTarget) {
+            if (manual && !autoMode) {
+                // Without the automatic mode, only the user sends a request again
+                return;
+            }
+            // Retry the failed size as an automatic request
+            fillTarget(w, h, nowMs);
+        }
+
+        // The back-off belongs to the target that is retried
+        int targetW = m_TargetWidth;
+        int targetH = m_TargetHeight;
+        if (!m_Backoff.matches(targetW, targetH)) {
+            m_Backoff = {true, targetW, targetH, nowMs};
+            m_BackoffCount = 0;
+        }
+        else {
+            m_BackoffCount++;
+        }
+
+        if (diff(nowMs, m_Backoff.timeMs) >= (int32_t)BackoffLimitMs) {
+            // The host stays busy: stop until the target changes
+            m_Backoff.active = false;
+            m_RetryArmed = false;
+            hold(targetW, targetH);
+            return;
+        }
+
+        uint32_t delay = BackoffFirstMs << (m_BackoffCount < 3 ? m_BackoffCount : 3);
+        if (delay > BackoffMaxMs) {
+            delay = BackoffMaxMs;
+        }
+        m_RetryArmed = true;
+        m_RetryAtMs = nowMs + delay;
+    }
+
     int32_t waitMs(uint32_t nowMs) const
     {
         int32_t wait = 0;
         if (!m_TargetManual) {
-            // Signed difference: correct when the tick count wraps
-            int32_t debounce = (int32_t)(m_TargetSinceMs + DebounceMs - nowMs);
+            int32_t debounce = diff(m_TargetSinceMs + DebounceMs, nowMs);
             if (debounce > wait) {
                 wait = debounce;
             }
         }
         if (m_RetryArmed) {
-            int32_t retry = (int32_t)(m_RetryAtMs - nowMs);
+            int32_t retry = diff(m_RetryAtMs, nowMs);
+            if (retry > wait) {
+                wait = retry;
+            }
+        }
+        if (!m_TargetManual && m_TimeoutWait.matches(m_TargetWidth, m_TargetHeight)) {
+            int32_t retry = diff(m_TimeoutWait.timeMs, nowMs);
             if (retry > wait) {
                 wait = retry;
             }
@@ -290,28 +437,41 @@ private:
         return wait;
     }
 
-    bool isBlocked(int w, int h) const
+    bool isExpired(const Refusal& refusal, uint32_t nowMs) const
+    {
+        return diff(nowMs, refusal.timeMs) >= (int32_t)RefusalExpiryMs;
+    }
+
+    // True when a refusal (not a timeout) of this size is in the list
+    bool isBlocked(int w, int h, uint32_t nowMs) const
     {
         for (const Refusal& refusal : m_Refusals) {
-            if (refusal.width == w && refusal.height == h) {
+            if (refusal.reason != ReasonTimeout && refusal.width == w && refusal.height == h &&
+                    !isExpired(refusal, nowMs)) {
                 return true;
             }
         }
         return false;
     }
 
-    // Records the refusal. Returns true when this (reason, size) is new.
-    bool block(uint16_t reason, int w, int h)
+    // Records the refusal. Returns true when this (reason, size) is new or
+    // its old entry expired.
+    bool record(uint16_t reason, int w, int h, uint32_t nowMs)
     {
-        for (const Refusal& refusal : m_Refusals) {
-            if (refusal.reason == reason && refusal.width == w && refusal.height == h) {
+        for (size_t i = 0; i < m_Refusals.size();) {
+            if (isExpired(m_Refusals[i], nowMs)) {
+                m_Refusals.erase(m_Refusals.begin() + i);
+                continue;
+            }
+            if (m_Refusals[i].reason == reason && m_Refusals[i].width == w && m_Refusals[i].height == h) {
                 return false;
             }
+            i++;
         }
         if (m_Refusals.size() >= MaxRefusals) {
             m_Refusals.erase(m_Refusals.begin());
         }
-        m_Refusals.push_back({reason, w, h});
+        m_Refusals.push_back({reason, w, h, nowMs});
         return true;
     }
 
@@ -322,6 +482,11 @@ private:
     uint32_t m_TargetSinceMs = 0;
     bool m_RetryArmed = false;
     uint32_t m_RetryAtMs = 0;
+    SizeMark m_Backoff = {false, 0, 0, 0};   // timeMs: the first failure
+    uint32_t m_BackoffCount = 0;
+    SizeMark m_Hold = {false, 0, 0, 0};
+    SizeMark m_TimeoutRetried = {false, 0, 0, 0};
+    SizeMark m_TimeoutWait = {false, 0, 0, 0}; // timeMs: when the retry can go
     std::vector<Refusal> m_Refusals;
 };
 

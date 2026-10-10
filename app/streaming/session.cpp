@@ -486,6 +486,9 @@ void Session::pumpLiveResize()
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                             "Live resize: could not send the request for %dx%d", width, height);
             }
+            // Keeps the target and starts the back-off, so takeSend() returns
+            // false on the next loop
+            m_ResizeState.sendFailed(width, height, manual, SDL_GetTicks());
             continue;
         }
 
@@ -2306,6 +2309,9 @@ void Session::exec()
     // Start rich presence to indicate we're in game
     RichPresenceManager presence(*m_Preferences, m_App.name);
 
+    // A manual request that gets BUSY is retried only in the automatic mode
+    m_ResizeState.autoMode = m_Preferences->autoLiveResize;
+
     // Toggle the stats overlay if requested by the user
     m_OverlayManager.setOverlayState(Overlay::OverlayDebug, m_Preferences->showPerformanceOverlay);
 
@@ -2415,7 +2421,8 @@ void Session::exec()
                 break;
             }
             case SDL_CODE_RESIZE_TIMEOUT: {
-                LiveResize::RefusalAction action = m_ResizeState.timedOut((uint32_t)(uintptr_t)event.user.data1);
+                LiveResize::RefusalAction action = m_ResizeState.timedOut((uint32_t)(uintptr_t)event.user.data1,
+                                                                          SDL_GetTicks());
                 if (action.matched) {
                     char text[128];
                     LiveResize::reasonText(LiveResize::ReasonTimeout, action.width, action.height, text, sizeof(text));

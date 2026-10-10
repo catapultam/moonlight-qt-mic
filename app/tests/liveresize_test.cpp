@@ -498,31 +498,68 @@ static void testControllerOldRefusal()
 static void testControllerTimeout()
 {
     LiveResize::ResizeController c;
+    c.autoMode = true;
     int w, h;
     bool manual;
 
     sendFirst(c, 0);
 
     // A timeout for another request id is ignored
-    LiveResize::RefusalAction action = c.timedOut(5);
+    LiveResize::RefusalAction action = c.timedOut(5, 10500);
     assert(!action.matched);
     assert(c.inFlight.active);
 
     // The timeout ends the request and is shown once for this size
-    c.setTarget(1920, 1080, false, 500);
-    action = c.timedOut(1);
+    action = c.timedOut(1, 10500);
     assert(action.matched && action.show);
     assert(!c.inFlight.active);
 
-    // The size is not sent again automatically
-    assert(!c.takeSend(2560, 1600, 20000, w, h, manual));
+    // M1: one automatic retry of the same size after 10 s
+    assert(c.wakeDelayMs(10500) == 10000);
+    assert(!c.takeSend(2560, 1600, 20499, w, h, manual));
+    assert(c.takeSend(2560, 1600, 20500, w, h, manual));
+    assert(w == 1920 && h == 1080 && !manual);
+    c.sent(w, h, 2, manual);
+
+    // The second timeout of the same size: not shown again, and the size is
+    // blocked until the target changes
+    action = c.timedOut(2, 30500);
+    assert(action.matched && !action.show);
+    assert(!c.takeSend(2560, 1600, 60000, w, h, manual));
+    c.setTarget(1920, 1080, false, 61000);
+    assert(!c.takeSend(2560, 1600, 62000, w, h, manual));
 
     // A different size is sent
-    c.setTarget(1600, 900, false, 21000);
-    assert(c.takeSend(2560, 1600, 21500, w, h, manual));
-    c.sent(w, h, 2, manual);
-    action = c.timedOut(2);
+    c.setTarget(1600, 900, false, 63000);
+    assert(c.takeSend(2560, 1600, 63500, w, h, manual));
+    c.sent(w, h, 3, manual);
+    action = c.timedOut(3, 73500);
     assert(action.matched && action.show);
+
+    // The target changed, so the old size can be sent again
+    c.setTarget(1920, 1080, false, 74000);
+    assert(c.takeSend(2560, 1600, 74500, w, h, manual));
+    assert(w == 1920 && h == 1080);
+
+    // A newer target in the slot is sent without the 10 s wait
+    LiveResize::ResizeController d;
+    d.autoMode = true;
+    sendFirst(d, 0);
+    d.setTarget(1600, 900, false, 600);
+    action = d.timedOut(1, 10500);
+    assert(action.matched);
+    assert(d.takeSend(2560, 1600, 10500, w, h, manual));
+    assert(w == 1600 && h == 900);
+
+    // Automatic mode off: a manual request that times out is not retried
+    LiveResize::ResizeController e;
+    e.setTarget(1920, 1080, true, 0);
+    assert(e.takeSend(2560, 1600, 0, w, h, manual));
+    e.sent(w, h, 1, manual);
+    action = e.timedOut(1, 10000);
+    assert(action.matched && action.show);
+    assert(e.wakeDelayMs(10000) == -1);
+    assert(!e.takeSend(2560, 1600, 30000, w, h, manual));
 }
 
 static void testControllerManual()
@@ -547,15 +584,13 @@ static void testControllerManual()
     assert(w == 1600 && h == 900 && manual);
     c.sent(w, h, 2, manual);
 
-    // A manual refusal is always shown, BUSY too
+    // A manual refusal is always shown, BUSY too. With automatic mode off,
+    // a manual BUSY is not retried (I1).
     LiveResize::RefusalAction action = c.refused(2, LiveResize::ReasonBusy, 300);
     assert(action.matched && action.show);
-    // The BUSY retry of a manual request also waits 1 s
-    assert(!c.takeSend(1920, 1080, 1299, w, h, manual));
-    assert(c.takeSend(1920, 1080, 1300, w, h, manual));
-    assert(w == 1600 && h == 900 && manual);
-    c.sent(w, h, 3, manual);
-    c.ended();
+    assert(c.wakeDelayMs(300) == -1);
+    assert(!c.takeSend(1920, 1080, 1300, w, h, manual));
+    assert(!c.takeSend(1920, 1080, 60000, w, h, manual));
 
     // An automatic target after a manual one wins and waits for the debounce
     sendFirst(c, 5000);
@@ -572,6 +607,192 @@ static void testControllerManual()
     d.setTarget(1366, 768, true, 100);
     assert(d.takeSend(2560, 1600, 100, w, h, manual));
     assert(w == 1366 && h == 768 && manual);
+}
+
+static void testControllerManualBusyAuto()
+{
+    // I1: automatic mode on: a manual BUSY shows the text once and is retried
+    // as an automatic request, with no more text
+    LiveResize::ResizeController c;
+    c.autoMode = true;
+    int w, h;
+    bool manual;
+
+    c.setTarget(1920, 1080, true, 0);
+    assert(c.takeSend(2560, 1600, 0, w, h, manual));
+    c.sent(w, h, 1, manual);
+    LiveResize::RefusalAction action = c.refused(1, LiveResize::ReasonBusy, 100);
+    assert(action.matched && action.show);
+    assert(!c.takeSend(2560, 1600, 1099, w, h, manual));
+    assert(c.takeSend(2560, 1600, 1100, w, h, manual));
+    assert(w == 1920 && h == 1080 && !manual);
+    c.sent(w, h, 2, manual);
+    action = c.refused(2, LiveResize::ReasonBusy, 1200);
+    assert(action.matched && !action.show);
+}
+
+static void testControllerBusyBackoff()
+{
+    // I1: automatic BUSY retries back off 1 s, 2 s, 4 s, 8 s, 8 s, ... and stop
+    // after 30 s of BUSY for the same target
+    LiveResize::ResizeController c;
+    c.autoMode = true;
+    int w, h;
+    bool manual;
+    uint32_t now = 0;
+    uint32_t id = 1;
+
+    sendFirst(c, 0);
+    now = 1000;
+    const int32_t delays[] = { 1000, 2000, 4000, 8000, 8000, 8000 };
+    for (int32_t delay : delays) {
+        LiveResize::RefusalAction action = c.refused(id, LiveResize::ReasonBusy, now);
+        assert(action.matched && !action.show);
+        assert(c.wakeDelayMs(now) == delay);
+        assert(!c.takeSend(2560, 1600, now + delay - 1, w, h, manual));
+        now += delay;
+        assert(c.takeSend(2560, 1600, now, w, h, manual));
+        assert(w == 1920 && h == 1080);
+        c.sent(w, h, ++id, manual);
+    }
+    // First BUSY at 1000; now is 32000, more than 30 s later: stop
+    LiveResize::RefusalAction action = c.refused(id, LiveResize::ReasonBusy, now);
+    assert(action.matched && !action.show);
+    assert(c.wakeDelayMs(now) == -1);
+    assert(!c.takeSend(2560, 1600, now + 60000, w, h, manual));
+
+    // The same target again (a pump reads the window again): not sent
+    c.setTarget(1920, 1080, false, now + 100);
+    assert(!c.takeSend(2560, 1600, now + 1000, w, h, manual));
+
+    // A new different target restarts it
+    c.setTarget(1600, 900, false, now + 2000);
+    assert(c.takeSend(2560, 1600, now + 2500, w, h, manual));
+    c.sent(w, h, ++id, manual);
+    action = c.refused(id, LiveResize::ReasonBusy, now + 2600);
+    assert(c.wakeDelayMs(now + 2600) == 1000);
+
+    // Back to the old size: the target changed, so it is sent
+    c.setTarget(1920, 1080, false, now + 3000);
+    assert(c.takeSend(2560, 1600, now + 3600, w, h, manual));
+    assert(w == 1920 && h == 1080);
+    c.sent(w, h, ++id, manual);
+    // The back-off of this size starts again at 1 s
+    action = c.refused(id, LiveResize::ReasonBusy, now + 3700);
+    assert(c.wakeDelayMs(now + 3700) == 1000);
+
+    // A success resets the back-off
+    LiveResize::ResizeController d;
+    d.autoMode = true;
+    sendFirst(d, 0);
+    d.refused(1, LiveResize::ReasonBusy, 1000);
+    assert(d.takeSend(2560, 1600, 2000, w, h, manual));
+    d.sent(w, h, 2, manual);
+    d.ended();
+    d.setTarget(1600, 900, false, 3000);
+    assert(d.takeSend(1920, 1080, 3500, w, h, manual));
+    d.sent(w, h, 3, manual);
+    d.refused(3, LiveResize::ReasonBusy, 4000);
+    assert(d.wakeDelayMs(4000) == 1000);
+}
+
+static void testControllerRefusalExpiry()
+{
+    // M2: a refused size is blocked for 60 s only
+    LiveResize::ResizeController c;
+    c.autoMode = true;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+    LiveResize::RefusalAction action = c.refused(1, LiveResize::ReasonMultipleClients, 1000);
+    assert(action.show);
+    c.setTarget(1920, 1080, false, 30000);
+    assert(!c.takeSend(2560, 1600, 60999, w, h, manual));
+    c.setTarget(1920, 1080, false, 61000);
+    assert(c.takeSend(2560, 1600, 61500, w, h, manual));
+    c.sent(w, h, 2, manual);
+    // The entry expired, so the text is shown again
+    action = c.refused(2, LiveResize::ReasonMultipleClients, 62000);
+    assert(action.show);
+
+    // M2: a stream size change clears the list
+    LiveResize::ResizeController d;
+    d.autoMode = true;
+    sendFirst(d, 0);
+    d.refused(1, LiveResize::ReasonMultipleClients, 1000);
+    d.setTarget(1600, 900, false, 2000);
+    assert(d.takeSend(2560, 1600, 2500, w, h, manual));
+    d.sent(w, h, 2, manual);
+    d.ended();
+    d.setTarget(1920, 1080, false, 3000);
+    assert(d.takeSend(1600, 900, 3500, w, h, manual));
+    assert(w == 1920 && h == 1080);
+}
+
+static void testControllerSendFailed()
+{
+    // M3: a send failure keeps the target and retries with the back-off
+    LiveResize::ResizeController c;
+    c.autoMode = true;
+    int w, h;
+    bool manual;
+
+    c.setTarget(1920, 1080, false, 0);
+    assert(c.takeSend(2560, 1600, 500, w, h, manual));
+    c.sendFailed(w, h, manual, 500);
+    assert(!c.inFlight.active);
+    assert(c.wakeDelayMs(500) == 1000);
+    assert(!c.takeSend(2560, 1600, 1499, w, h, manual));
+    assert(c.takeSend(2560, 1600, 1500, w, h, manual));
+    assert(w == 1920 && h == 1080);
+    c.sendFailed(w, h, manual, 1500);
+    assert(c.wakeDelayMs(1500) == 2000);
+
+    // A newer target in the slot is not replaced by the failed one
+    LiveResize::ResizeController d;
+    d.autoMode = true;
+    d.setTarget(1920, 1080, false, 0);
+    assert(d.takeSend(2560, 1600, 500, w, h, manual));
+    d.setTarget(1600, 900, false, 600);
+    d.sendFailed(1920, 1080, false, 700);
+    assert(d.takeSend(2560, 1600, 1700, w, h, manual));
+    assert(w == 1600 && h == 900);
+
+    // Automatic mode off: a manual send failure is not retried
+    LiveResize::ResizeController e;
+    e.setTarget(1920, 1080, true, 0);
+    assert(e.takeSend(2560, 1600, 0, w, h, manual));
+    e.sendFailed(w, h, manual, 0);
+    assert(e.wakeDelayMs(0) == -1);
+    assert(!e.takeSend(2560, 1600, 5000, w, h, manual));
+}
+
+static void testControllerRefusalDropsSlot()
+{
+    // M4: a manual target of the refused size in the slot is dropped
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    c.setTarget(1920, 1080, true, 0);
+    assert(c.takeSend(2560, 1600, 0, w, h, manual));
+    c.sent(w, h, 1, manual);
+    c.setTarget(1920, 1080, true, 100);
+    LiveResize::RefusalAction action = c.refused(1, LiveResize::ReasonSizeLimit, 200);
+    assert(action.matched && action.show);
+    assert(!c.takeSend(2560, 1600, 200, w, h, manual));
+    assert(c.wakeDelayMs(200) == -1);
+
+    // A target of another size stays
+    LiveResize::ResizeController d;
+    d.setTarget(1920, 1080, true, 0);
+    assert(d.takeSend(2560, 1600, 0, w, h, manual));
+    d.sent(w, h, 1, manual);
+    d.setTarget(1600, 900, true, 100);
+    d.refused(1, LiveResize::ReasonSizeLimit, 200);
+    assert(d.takeSend(2560, 1600, 200, w, h, manual));
+    assert(w == 1600 && h == 900);
 }
 
 static void testControllerReset()
@@ -609,6 +830,11 @@ int main()
     testControllerOldRefusal();
     testControllerTimeout();
     testControllerManual();
+    testControllerManualBusyAuto();
+    testControllerBusyBackoff();
+    testControllerRefusalExpiry();
+    testControllerSendFailed();
+    testControllerRefusalDropsSlot();
     testControllerReset();
     puts("liveresize_test: all checks passed");
     return 0;
