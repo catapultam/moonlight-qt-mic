@@ -4809,25 +4809,37 @@ Run 1 (`APP_LIMITED_PCT` 70):
 - Step 4, limit removed: FAIL. The app-limited guard blocked the increase;
   measured only 63-75 % of the encoder value with full motion.
 - Delay cuts without loss: no key frame after the in-place change.
-- Step 5, 3 % random loss: the FEC rule (R5) cut the target to about
+- Step 5, 3 % random loss: the FEC rule (rule 3) cut the target to about
   2300 kbps.
 - Step 5, 40 ms delay: one delay cut, then the RTT baseline moved.
 
 Run 2 (`APP_LIMITED_PCT` 40):
 
-- Step 4, recovery after 30 Mbit/s: 31212 -> 64000 kbps in about 1 min 45 s.
+- Step 4, recovery after 30 Mbit/s: 31212 -> 64000 kbps in about 1 min 51 s,
+  with one delay cut in the middle (36181 -> 32562 kbps).
 - Step 4, recovery after 3 % loss: 22982 -> 64000 kbps in about 1 min 40 s.
 - Static desktop: measured 0.1-1.3 Mbps, no increase.
-- Step 5, FAIL: on a static desktop with a clean link, delay cuts on RTT
-  jitter took the target from 64000 to 10040 kbps in 2 min.
+- Step 5, FAIL: the first cut was FEC (fec 3.6 %), while the 3 % loss phase
+  was still ending. Delay cuts on RTT jitter followed; the largest cut was
+  a loss cut, 24793 -> 12396 kbps at 16.1 % loss. The target reached its
+  lowest point, 9036 kbps, at 00:11:44. The network was not clean for the
+  whole period; it was clean only after the loss phase ended.
 
 Run 3 (rule 3 needs the stream not app-limited, with a 5 s hold):
 
 - Step 1, static clean, 2 min: no cut.
 - Step 2, 30 Mbit/s: 64000 -> 32000 -> 23513 kbps, reason loss.
-- Step 4, recovery: back to 64000 kbps in about 80 s.
+- Step 4, recovery: the last cut (00:02:55) back to 64000 kbps (00:04:25)
+  in about 90 s.
 - Static after motion: no cut.
 - Session mean: 58470 kbps.
+
+Key frames after an in-place change: run 1 saw one after requests 2, 6 and
+8 (all loss cuts); run 3 saw one after request 2 (a loss cut) and after
+requests 4 and 15 (increases: request 4 was followed by a loss cut;
+request 15 came with a renderer recreate). The in-place change itself
+never makes a key frame; the key frame comes from the loss itself (common-c
+asks for one) or from a renderer recreate.
 
 Host log (`sunshine.log`): no "first frame after a bitrate change is an IDR
 frame" line, no `NvEncReconfigureEncoder` failure, no encoder-failed line,

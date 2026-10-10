@@ -265,8 +265,8 @@ last 12 deltas (3 s at the tick rate): rule 2 needs three 1 s windows.
 | Signal | Source | Writer thread | Update rate |
 |--------|--------|---------------|-------------|
 | Frames finished and lost | New cumulative counters, changed only in `connectionSawFrame()` (`ControlStream.c`). It reads `lastGoodFrame`, which `connectionReceivedCompleteFrame()` sets as before. Read with new `LiGetVideoFrameCounters()`. One function changes both counters for a frame under one mutex, and the read takes the same mutex, so the pair is consistent and a tick boundary cannot show a false loss | video receive thread | each frame |
-| FEC packets recovered and failed, video packets | `RTP_VIDEO_STATS` (`Limelight.h:948-956`, `LiGetRTPVideoStats()`). `RtpVideoQueue.c` did not count recovered video packets; the client now counts them in `reconstructFrame()` | video receive thread | each packet |
-| RTT and RTT variance | `LiGetEstimatedRttInfo()` (ENet `roundTripTime`, smoothed) | ENet service | each ACK of a reliable packet; the periodic ping is reliable and goes each 100 ms (`ControlStream.c:332, 1500-1512`) |
+| FEC packets recovered, video packets | `RTP_VIDEO_STATS` (`Limelight.h:948-956`, `LiGetRTPVideoStats()`). `RtpVideoQueue.c` did not count recovered video packets; the client now counts them in `reconstructFrame()`. `Sample` has no FEC-failed count (section 10) | video receive thread | each packet |
+| RTT | `LiGetEstimatedRttInfo()` (ENet `roundTripTime`, smoothed). `Sample` has no RTT variance field (section 10) | ENet service | each ACK of a reliable packet; the periodic ping is reliable and goes each 100 ms (`ControlStream.c:332, 1500-1512`) |
 | Measured bitrate | New session-owned `BandwidthTracker` (reuse `app/streaming/bandwidth.h`), fed with `du->fullLength` by `Session::countDecodeUnit()`. The FFmpeg decoder uses the pull model (`CAPABILITY_PULL_RENDERER`), so `drSubmitDecodeUnit` does not run for it: `FFmpegVideoDecoder::submitDecodeUnit()` calls `countDecodeUnit()` on its decoder thread. `drSubmitDecodeUnit` calls it for push decoders. The decoder tracker `m_BwTracker` is not used: it is per decoder (a live resize makes a new one) and only shows with `DISPLAY_BITRATE` | decoder thread | each frame; average over the last 2.5 s |
 
 Notes:
@@ -394,10 +394,12 @@ not climb.
 App-limited guard (rule 3): a decrease on delay or FEC pressure also needs
 the guard. A lower bitrate cannot fix delay or FEC pressure that the stream
 does not cause. In the end-to-end test, a static desktop (measured 0.1-1.3
-Mbps, `encoder_kbps` 30-50 Mbps) on a clean network had RTT samples of
-17-58 ms against a baseline of 1 ms. Rule 3 fired again and again, and FEC
-pressure from random loss also cut. The target fell from 64 to 10 Mbps in 2
-minutes. The next motion then started low and climbed for about 2 minutes.
+Mbps, `encoder_kbps` 30-50 Mbps) had RTT samples of 17-58 ms against a
+baseline of 1 ms. The first cut was FEC pressure from the tail of a 3 %
+random loss test; the network was clean after that, and rule 3 then fired
+again and again on RTT jitter alone. The target fell from 64000 to 9036
+kbps (encoder 6216 kbps) in about 2 minutes. The next motion then started
+low and climbed for about 2 minutes.
 The loss rule (rule 2) does not use the guard: loss is a stronger signal,
 and the cut is limited by `MAX_CUT` and the measured bitrate. Thus the guard
 limits the drop on a static desktop, but does not remove it: in the same
@@ -445,8 +447,12 @@ this.
    each decoder recreate (`session.cpp:468`). `start()` and the tick timer
    act only on the first event of the session. Later events do nothing:
    the resize path sets its own settle time (section 4.6).
-2. The first tick after `START_SETTLE_MS` always sends one request with the
-   ceiling, also when it equals `m_StreamConfig.bitrate`. The host answers
+2. The first free tick after `START_SETTLE_MS` sends one request with the
+   ceiling, also when it equals `m_StreamConfig.bitrate`, unless an answer
+   to another request arrives first (for example a live resize "new limit"
+   request, section 4.6, which can send its own request right away, before
+   the first free tick). `onStatus()` ends the start phase on the first
+   answer it accepts, for whichever request that is. The host answers
    `UNCHANGED` or `APPLIED` with the real `accepted_kbps` and
    `encoder_kbps`. Rules 2 and 5 need these values, and a `max_bitrate` cap
    shows at once. No other decision comes before this status (rule 1).
@@ -1026,9 +1032,10 @@ with a fake clock:
 - Host googletest `tests/unit/test_adaptive_bitrate.cpp` (as
   `tests/unit/test_live_resize.cpp`): `encoder_bitrate()` gives the same
   values as the old inline code for a table of inputs (FEC 0/20/90, stereo
-  and 7.1, high and normal audio, cap on and off, warp 1 and 2); payload
-  sizes (`sizeof` request 8, status 18); byte order with
-  `util::endian::little`.
+  and 7.1, high and normal audio, cap on and off, warp 1 and 2); the
+  payload size constants (`REQUEST_PAYLOAD_SIZE` 8, `STATUS_PAYLOAD_SIZE`
+  18); byte order with fixed byte arrays, decoded and encoded by
+  `adaptive_bitrate::decode_request()` and `encode_status()`.
 - Client common-c: `LiSendBitrateRequest` returns an error with no
   connection and when the host did not advertise D5.
 
@@ -1141,5 +1148,8 @@ Later changes from the end-to-end test (Task 11):
 - `APP_LIMITED_PCT` changed from 70 to 40.
 - Rule 3 (delay and FEC decrease) needs the stream to be not app-limited,
   with a 5 s hold of the last clean measured value.
-- The host release interval is 500 ms. The host does not release a change
-  while the first change is in flight.
+- The host release interval is 500 ms. Before the first restart, the host
+  does not release a new change while a change is in flight (`in_flight &&
+  !restart_mode`, spec 5.3 step 2). After the first restart, the host
+  releases once `RESTART_INTERVAL` has passed since the last restart, even
+  with a change still in flight.
