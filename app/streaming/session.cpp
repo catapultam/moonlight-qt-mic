@@ -446,14 +446,27 @@ void Session::triggerAutoLiveResize()
         return;
     }
 
-    if (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_MINIMIZED) {
+    Uint32 flags = SDL_GetWindowFlags(m_Window);
+    if (flags & SDL_WINDOW_MINIMIZED) {
+        return;
+    }
+
+    // Only a change of the logical size or the full-screen mode sets a target.
+    // A change of the pixel size alone is a scale change, for example when
+    // PaperWM scrolls the window partly onto a monitor with a different scale.
+    int logicalWidth, logicalHeight;
+    Uint32 fullscreen = flags & SDL_WINDOW_FULLSCREEN_DESKTOP;
+    SDL_GetWindowSize(m_Window, &logicalWidth, &logicalHeight);
+    if (!m_AutoResizeWindow.differs(logicalWidth, logicalHeight, fullscreen)) {
         return;
     }
 
     if (!getLiveResizeTarget(width, height, false) || width == 0 || height == 0) {
+        // Do not record the state, so that the next pump tries again
         return;
     }
 
+    m_AutoResizeWindow.record(logicalWidth, logicalHeight, fullscreen);
     m_ResizeState.setTarget(width, height, false, SDL_GetTicks());
 }
 
@@ -469,9 +482,9 @@ void Session::pumpLiveResize()
         return;
     }
 
-    // Read the window size again. On some platforms the full-screen flag
-    // changes after the last size event. The same size does not restart the
-    // debounce.
+    // Read the window state again. On some platforms the full-screen flag
+    // changes after the last size event. A window state without a change of
+    // the logical size or the full-screen mode sets no target.
     triggerAutoLiveResize();
 
     int width, height;
@@ -2491,6 +2504,7 @@ void Session::exec()
             case SDL_WINDOWEVENT_SIZE_CHANGED:
                 // Drag, tiling and full-screen changes. pumpLiveResize() reads
                 // the new target, and the debounce waits until it is stable.
+                // A scale change alone (same logical size) sets no target.
                 if (m_Preferences->autoLiveResize && m_AutoResizeArmed) {
                     pumpLiveResize();
                 }
@@ -2760,6 +2774,7 @@ DispatchDeferredCleanup:
 
     // Stop the live resize timers before this object can go away
     m_ResizeState.reset();
+    m_AutoResizeWindow.reset();
     clearPendingResize();
     if (m_ResizePumpTimer != 0) {
         SDL_RemoveTimer(m_ResizePumpTimer);

@@ -560,18 +560,39 @@ Automatic triggers (only when the setting `autoLiveResize` is on, section
    change.
 
 Each trigger calls `Session::pumpLiveResize()`. The pump reads the window
-target again each time (`triggerAutoLiveResize()`), because on some
+state again each time (`triggerAutoLiveResize()`), because on some
 platforms the full-screen flag changes after the last size event. It does
 not set an automatic target when the window is minimized, when a dimension
 is 0 after the rounding, or when the host has no live resize support (then
 it logs one line per stream and shows no overlay).
+
+Rule for the automatic target: the pump sets an automatic target only when
+the window state changed since the last automatic target. The window state
+is the logical window size (`SDL_GetWindowSize`) and the full-screen flags
+(`SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP`). A drag, a
+tiling change, and full screen on or off change it. The first check after
+the arming has no last state, so the stream start always sets a target. The
+state is recorded only when a target is set. `LiveResize::WindowTrigger` in
+`liveresize.h` (member `m_AutoResizeWindow`) holds the state. The cleanup at
+the end of `Session::exec` resets it.
+
+Reason: a change of the pixel size with the same logical size is a scale
+change. PaperWM can scroll the window so that part of it is on a monitor
+with a different scale. Then SDL sends `SDL_WINDOWEVENT_SIZE_CHANGED` and
+the pixel size changes (for example 3070x2024 and 3274x2158 for the logical
+size 2456x1619) each time the window crosses the monitor edge. Without the
+rule, each crossing started an automatic request. The target of an
+automatic request is still the pixel size (section 5.3). The manual hotkey
+does not use this rule; it always sends the current pixel size.
 
 The FFmpeg decoder is the only decoder that sends event 111. The Steam Link
 decoder (`slvid.cpp`) does not, so the automatic mode does not arm there.
 
 ### 5.3 Size computation and request state
 
-Size computation (`Session::getLiveResizeTarget`, used by both triggers):
+Size computation (`Session::getLiveResizeTarget`, used by both triggers;
+the automatic trigger calls it only after a change of the window state,
+section 5.2):
 
 1. Manual only: if `!LiIsLiveResizeSupported()`, show reason 7 and return
    (`requestLiveResize()`).
@@ -643,10 +664,11 @@ All calls of `LiSendResizeRequest` are in the pump, on the SDL main thread,
 in the event loop of `Session::exec`. This is between `LiStartConnection`
 and `LiStopConnection`. `LiIsLiveResizeSupported` is read only there.
 
-Known limit: when the host changes the stream size on its own (for example a
-game sets a display mode), the automatic mode asks for the window size
-again. The client and the host application can then change the size back
-and forth.
+Host size change: when the host changes the stream size on its own (for
+example a game sets a display mode), the automatic mode does not ask for the
+window size again, because the window state did not change (section 5.2).
+The next change of the logical window size or the full-screen mode, or the
+hotkey, sends the window size again.
 
 Note on full screen: `app/main.cpp:753` sets
 `SDL_VIDEO_WAYLAND_MODE_SCALING=aspect`, and
@@ -949,7 +971,11 @@ pointer in `moonlight-qt-mic`.
   the target (`testControllerSendFailed`); a refusal drops a slot target of
   the same size (`testControllerRefusalDropsSlot`); a refusal for an old
   `request_id` is ignored; a manual request shares the slot, is sent at
-  once, and its refusal is always shown; `reset()`.
+  once, and its refusal is always shown; `reset()`. `testWindowTrigger`
+  tests `WindowTrigger` (section 5.2): the stream start sets a target; the
+  same logical size with a different pixel size does not; a different
+  logical size does; a change of the full-screen flags does, also with the
+  same logical size; `reset()` forgets the state.
 - common-c: build with `-DUSE_MBEDTLS` off in the toolbox and check that
   `LiSendResizeRequest` returns an error when no connection exists.
 

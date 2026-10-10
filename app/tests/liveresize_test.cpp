@@ -809,6 +809,64 @@ static void testControllerReset()
     assert(c.wakeDelayMs(5000) == -1);
 }
 
+// The session calls setTarget() only when the window trigger says that the
+// window changed. Returns true when it called setTarget().
+static bool windowEvent(LiveResize::WindowTrigger& t, LiveResize::ResizeController& c,
+                        int logicalW, int logicalH, uint32_t fullscreen, int pixelW, int pixelH, uint32_t now)
+{
+    if (!t.differs(logicalW, logicalH, fullscreen)) {
+        return false;
+    }
+    t.record(logicalW, logicalH, fullscreen);
+    c.setTarget(pixelW, pixelH, false, now);
+    return true;
+}
+
+static void testWindowTrigger()
+{
+    LiveResize::WindowTrigger t;
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    // Stream start: no state yet, so the first check triggers
+    assert(windowEvent(t, c, 2456, 1619, 0, 3070, 2024, 0));
+    assert(c.takeSend(2560, 1600, 500, w, h, manual));
+    assert(w == 3070 && h == 2024);
+    c.sent(w, h, 1, manual);
+    c.ended();
+
+    // PaperWM scrolls the window across a monitor with another scale: the
+    // logical size stays, the pixel size changes. No new target.
+    assert(!windowEvent(t, c, 2456, 1619, 0, 3274, 2158, 1000));
+    assert(!windowEvent(t, c, 2456, 1619, 0, 3070, 2024, 1100));
+    assert(!c.takeSend(3070, 2024, 5000, w, h, manual));
+    assert(c.wakeDelayMs(5000) == -1);
+
+    // A drag or a tiling change: the logical size changes
+    assert(windowEvent(t, c, 2400, 1600, 0, 3000, 2000, 6000));
+    assert(c.takeSend(3070, 2024, 6500, w, h, manual));
+    assert(w == 3000 && h == 2000);
+    c.sent(w, h, 2, manual);
+    c.ended();
+
+    // Full screen on: a different logical size and a full-screen flag
+    assert(windowEvent(t, c, 3072, 1920, 0x1001, 3840, 2400, 7000));
+
+    // The full-screen flag changes after the last size event, with the same
+    // logical size: also a trigger
+    assert(windowEvent(t, c, 3072, 1920, 0x1, 3840, 2400, 7100));
+    assert(!windowEvent(t, c, 3072, 1920, 0x1, 3840, 2400, 7200));
+
+    // Full screen off with the same logical size (a window tiled to the full
+    // monitor): a trigger
+    assert(windowEvent(t, c, 3072, 1920, 0, 3840, 2400, 7300));
+
+    // The end of the stream forgets the state
+    t.reset();
+    assert(t.differs(3072, 1920, 0));
+}
+
 int main()
 {
     testRoundDownEven();
@@ -836,6 +894,7 @@ int main()
     testControllerSendFailed();
     testControllerRefusalDropsSlot();
     testControllerReset();
+    testWindowTrigger();
     puts("liveresize_test: all checks passed");
     return 0;
 }

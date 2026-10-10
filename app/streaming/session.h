@@ -255,7 +255,8 @@ private:
     // when the size cannot be read. For a manual request it shows the reason.
     bool getLiveResizeTarget(int& width, int& height, bool manual);
 
-    // Sets the window size as the automatic target when the setting is on
+    // Sets the window size as the automatic target when the setting is on and
+    // the logical window size or the full-screen mode changed (spec 5.2)
     void triggerAutoLiveResize();
 
     // Sends the next request when the rules allow it, else starts the timer
@@ -336,6 +337,8 @@ private:
     };
     StatusOverlayOwner m_StatusOverlayOwner;
     LiveResize::ResizeController m_ResizeState;
+    // The window state at the last automatic target
+    LiveResize::WindowTrigger m_AutoResizeWindow;
     SDL_TimerID m_ResizeTimeoutTimer;
     // One-shot timer of the debounce and the BUSY retry
     SDL_TimerID m_ResizePumpTimer;

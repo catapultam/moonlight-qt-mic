@@ -490,6 +490,43 @@ private:
     std::vector<Refusal> m_Refusals;
 };
 
+// The window state at the last automatic trigger. An automatic target is set
+// only when the logical window size or the full-screen mode changes (a drag, a
+// tiling change, full screen on or off). A change of the pixel size alone is a
+// scale change, for example when PaperWM scrolls the window partly onto a
+// monitor with a different scale. It does not set an automatic target. The
+// target itself stays the pixel size.
+class WindowTrigger {
+public:
+    // True when there is no state yet (stream start), or when the logical size
+    // or the full-screen flags differ from the last trigger
+    bool differs(int logicalW, int logicalH, uint32_t fullscreenFlags) const
+    {
+        return !m_Valid || logicalW != m_Width || logicalH != m_Height || fullscreenFlags != m_Fullscreen;
+    }
+
+    // The session set an automatic target for this window state
+    void record(int logicalW, int logicalH, uint32_t fullscreenFlags)
+    {
+        m_Valid = true;
+        m_Width = logicalW;
+        m_Height = logicalH;
+        m_Fullscreen = fullscreenFlags;
+    }
+
+    // Forgets the state (end of the stream)
+    void reset()
+    {
+        *this = WindowTrigger();
+    }
+
+private:
+    bool m_Valid = false;
+    int m_Width = 0;
+    int m_Height = 0;
+    uint32_t m_Fullscreen = 0;
+};
+
 enum class FrameSizeClass {
     Original,   // the size the decoder was created with
     Padding,    // encoder padding to crop (larger by less than 64 in both dimensions)
