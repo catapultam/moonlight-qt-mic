@@ -509,10 +509,156 @@ static void testEncoderFailed()
     uint32_t id = sim.send(d);
     // The restart failed: the host still runs 40000 (accepted) with encoder 32000
     assert(sim.c.onStatus(id, StatusEncoderFailed, 30000, 40000, 32000, sim.s.nowMs) == StatusResult::Accepted);
-    assert(sim.c.targetKbps() == 40000);
+    assert(sim.c.targetKbps() == 40000 && sim.c.restartMode());
     for (int i = 0; i < 12; i++) {
         assert(!sim.step(1).send);  // RESTART_SETTLE_MS
     }
+    // The rules start again after the settle time
+    assert(sim.stepUntilSend(d, 40, 1) > 0);
+    assert(d.reason == Reason::Loss && d.targetKbps == 30000);
+}
+
+// Spec 4.5: ENCODER_FAILED after a lower ceiling sends the ceiling again
+static void testEncoderFailedLowerCeiling()
+{
+    Sim sim(40000);
+    sim.runStart();
+    Decision r = sim.c.setCeiling(20000, sim.s.nowMs);
+    assert(r.send && r.targetKbps == 20000);
+    uint32_t id = sim.send(r);
+    assert(sim.c.onStatus(id, StatusEncoderFailed, 20000, 40000, 32000, sim.s.nowMs) == StatusResult::Accepted);
+    assert(sim.c.targetKbps() == 20000 && sim.c.ceilingKbps() == 20000);
+    Decision d;
+    assert(sim.stepUntilSend(d, 40) == 12);  // RESTART_SETTLE_MS
+    assert(d.reason == Reason::Resend && d.fromKbps == 20000 && d.targetKbps == 20000);
+    id = sim.send(d);
+    assert(sim.answer(id, 20000) == StatusResult::Accepted);
+    for (int i = 0; i < 40; i++) {
+        assert(!sim.step().send);
+    }
+}
+
+// Spec 4.5: the wait after ENCODER_FAILED doubles up to 60 s; an applied status resets it
+static void testEncoderFailedBackoff()
+{
+    Sim sim(40000);
+    sim.runStart();
+    Decision r = sim.c.setCeiling(20000, sim.s.nowMs);
+    uint32_t id = sim.send(r);
+    const int waits[] = {12, 24, 48, 96, 192, 240, 240};  // 3 s, 6 s, 12 s, 24 s, 48 s, 60 s, 60 s
+    for (int wait : waits) {
+        assert(sim.c.onStatus(id, StatusEncoderFailed, 20000, 40000, 32000, sim.s.nowMs) == StatusResult::Accepted);
+        Decision d;
+        assert(sim.stepUntilSend(d, 300) == wait);
+        assert(d.reason == Reason::Resend && d.targetKbps == 20000);
+        id = sim.send(d);
+    }
+    assert(sim.answer(id, 20000) == StatusResult::Accepted);
+
+    // The wait starts again at 3 s
+    r = sim.c.setCeiling(10000, sim.s.nowMs);
+    assert(r.send && r.targetKbps == 10000);
+    id = sim.send(r);
+    assert(sim.c.onStatus(id, StatusEncoderFailed, 10000, 20000, 16000, sim.s.nowMs) == StatusResult::Accepted);
+    Decision d;
+    assert(sim.stepUntilSend(d, 300) == 12);
+    assert(d.reason == Reason::Resend && d.targetKbps == 10000);
+}
+
+// Spec 3.5: after a timeout, the next free tick sends the target again
+static void testTimeoutResend()
+{
+    Sim sim(40000);
+    sim.runStart();
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 1) > 0 && d.targetKbps == 30000);
+    uint32_t id = sim.send(d);
+    Decision t;
+    int steps = 0;
+    do {
+        t = sim.step();
+        steps++;
+    } while (!t.timedOut && steps < 20);
+    assert(t.timedOut && !t.send && steps == 12);
+    Decision r = sim.step();
+    assert(r.send && r.reason == Reason::Resend && r.fromKbps == 30000 && r.targetKbps == 30000);
+    uint32_t newId = sim.send(r);
+    assert(sim.answer(id, 30000) == StatusResult::Ignored);  // a newer request is pending
+    assert(sim.answer(newId, 30000) == StatusResult::Accepted);
+}
+
+// Spec 3.5: a late answer before the resend gives the host state; no resend
+static void testLateAnswer()
+{
+    Sim sim(40000);
+    sim.runStart();
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 1) > 0);
+    uint32_t id = sim.send(d);
+    Decision t;
+    do {
+        t = sim.step();
+    } while (!t.timedOut);
+    assert(sim.answer(id, d.targetKbps) == StatusResult::Accepted);
+    assert(!sim.c.pending() && sim.c.encoderKbps() == 24000);
+    for (int i = 0; i < 8; i++) {
+        assert(!sim.step().send);
+    }
+}
+
+// Spec 3.5 and D12: a timeout in non-adaptive mode also sends the target again
+static void testTimeoutNotAdaptive()
+{
+    Sim sim(40000, false);
+    for (int i = 0; i < 20; i++) {
+        assert(!sim.step().send);
+    }
+    Decision r = sim.c.setCeiling(20000, sim.s.nowMs);
+    assert(r.send && r.targetKbps == 20000);
+    sim.send(r);
+    Decision t;
+    int steps = 0;
+    do {
+        t = sim.step();
+        steps++;
+    } while (!t.timedOut && steps < 20);
+    assert(t.timedOut && steps == 12);
+    Decision d = sim.step();
+    assert(d.send && d.reason == Reason::Resend && d.targetKbps == 20000);
+    uint32_t id = sim.send(d);
+    assert(sim.answer(id, 20000) == StatusResult::Accepted);
+    for (int i = 0; i < 40; i++) {
+        assert(!sim.step(5, 60, 10).send);
+    }
+}
+
+// Spec 4.5: an unknown status code stops the controller
+static void testUnknownStatus()
+{
+    Sim sim(40000);
+    Decision d;
+    assert(sim.stepUntilSend(d, 20) > 0);
+    uint32_t id = sim.send(d);
+    assert(sim.c.onStatus(id, 7, 40000, 40000, 32000, sim.s.nowMs) == StatusResult::Stopped);
+    assert(!sim.c.running() && strcmp(statusName(7), "UNKNOWN") == 0);
+    for (int i = 0; i < 40; i++) {
+        assert(!sim.step(5).send);
+    }
+}
+
+// The RTT is never known: no delay signal, the loss rule still works
+static void testRttZero()
+{
+    Sim sim(40000);
+    sim.s.rttMs = 0;
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 0, 0) == 16 && d.reason == Reason::Start);
+    sim.sendAndAnswer(d, StatusUnchanged);
+    for (int i = 0; i < 80; i++) {
+        assert(!sim.step(0, 0).send);
+    }
+    assert(sim.stepUntilSend(d, 20, 1, 0) == 6);  // full windows: 2 ticks with loss in each of 2 windows
+    assert(d.reason == Reason::Loss && d.targetKbps == 30000 && d.rttMs == 0 && d.rttBaselineMs == 0);
 }
 
 // Spec D12: the setting is off
@@ -561,6 +707,7 @@ static void testTexts()
     assert(strcmp(text, "Bitrate: target 44.0 Mbps (fixed), host encoder N/A, measured 31.2 Mbps\n") == 0);
     assert(strcmp(statusName(StatusAppliedRestart), "APPLIED_RESTART") == 0);
     assert(strcmp(reasonName(Reason::FecPressure), "FEC") == 0);
+    assert(strcmp(reasonName(Reason::Resend), "resend") == 0);
 }
 
 int main()
@@ -588,6 +735,13 @@ int main()
     testSmallWindows();
     testStatusStops();
     testEncoderFailed();
+    testEncoderFailedLowerCeiling();
+    testEncoderFailedBackoff();
+    testTimeoutResend();
+    testLateAnswer();
+    testTimeoutNotAdaptive();
+    testUnknownStatus();
+    testRttZero();
     testNotAdaptive();
     testCounterWrap();
     testTexts();

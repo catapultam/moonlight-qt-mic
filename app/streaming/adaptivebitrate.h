@@ -68,6 +68,7 @@ constexpr uint32_t MIN_INC_INTERVAL_MS = 4000;
 constexpr uint32_t MIN_INC_INTERVAL_RESTART_MS = 15000;
 constexpr uint32_t REQUEST_TIMEOUT_MS = 3000;
 constexpr uint32_t START_ATTEMPTS = 3;             // plan: start requests without an answer before the stop
+constexpr uint32_t ENCODER_FAILED_MAX_WAIT_MS = 60000; // the wait after ENCODER_FAILED doubles up to this value
 constexpr size_t WINDOW_TICKS = 4;                 // a 1 s window
 constexpr size_t WINDOWS = 3;
 constexpr size_t HISTORY = WINDOW_TICKS * WINDOWS; // plan: 3 s of deltas
@@ -93,6 +94,7 @@ enum class Reason {
     FecPressure,  // rule 3
     Increase,     // rule 5
     Ceiling,      // a new ceiling after a live resize (spec 4.6)
+    Resend,       // the same target again after a timeout or a failed change (spec 3.5, 4.5)
 };
 
 inline const char* reasonName(Reason reason)
@@ -104,6 +106,7 @@ inline const char* reasonName(Reason reason)
     case Reason::FecPressure: return "FEC";
     case Reason::Increase: return "increase";
     case Reason::Ceiling: return "new limit";
+    case Reason::Resend: return "resend";
     default: return "none";
     }
 }
@@ -129,7 +132,7 @@ struct Decision {
 enum class StatusResult {
     Ignored,   // an old or repeated answer
     Accepted,
-    Stopped,   // NOT_SUPPORTED, INPUT_ONLY or INVALID: the controller stops for the session
+    Stopped,   // NOT_SUPPORTED, INPUT_ONLY, INVALID or an unknown code: the controller stops for the session
 };
 
 // Rule 6: a change smaller than max(3 %, 250 kbps) is not sent, except a change to
@@ -237,12 +240,26 @@ public:
                 d.stopped = true;
                 return d;
             }
+            // The host can run another value now (its watchdog and re-apply, spec 5.3).
+            // A later free tick sends the target again, but a late answer comes first.
+            if (!m_StartPhase) {
+                m_Resend = true;
+            }
+            return d;
         }
 
         // Rule 1: a pending request or a settle time. The deltas of this time do
         // not count (an IDR frame or a full queue is not a network signal).
         if (m_Pending || now < m_SettleUntilMs) {
             clearHistory(now);
+            return d;
+        }
+
+        // Spec 3.5 and 4.5: send the target again. No dead band and no interval:
+        // the value does not change.
+        if (m_Resend) {
+            d.send = true;
+            d.reason = Reason::Resend;
             return d;
         }
         if (!m_Adaptive) {
@@ -403,6 +420,7 @@ public:
         m_PendingSinceMs = nowMs;
         m_LastSentId = requestId;
         m_LastSentHandled = false;
+        m_Resend = false;
         switch (decision.reason) {
         case Reason::Loss:
         case Reason::FecPressure:
@@ -431,13 +449,15 @@ public:
     StatusResult onStatus(uint32_t requestId, uint16_t status, uint32_t requestedKbps, uint32_t acceptedKbps,
                           uint32_t encoderKbps, uint64_t nowMs)
     {
-        // Only the answer for the newest request counts, and only one time
+        // Only the answer for the newest request counts, and only one time. After a
+        // timeout and before a new request, the late answer gives the host state.
         if (!running() || m_LastSentId == 0 || requestId != m_LastSentId || m_LastSentHandled) {
             return StatusResult::Ignored;
         }
         m_LastSentHandled = true;
         m_Pending = false;
         m_StartPhase = false;
+        m_Resend = false;
 
         switch (status) {
         case StatusApplied:
@@ -449,6 +469,7 @@ public:
             }
             m_AcceptedKbps = acceptedKbps;
             m_EncoderKbps = encoderKbps;
+            m_EncoderFailures = 0;
             if (acceptedKbps > 0 && acceptedKbps < requestedKbps) {
                 // The host cap (config::video.max_bitrate) is the ceiling for the session
                 m_HostCapKbps = acceptedKbps;
@@ -467,16 +488,28 @@ public:
                 notifySettle(nowMs, CHANGE_SETTLE_MS);
             }
             return StatusResult::Accepted;
-        case StatusEncoderFailed:
-            // The host runs the old values; the target goes back to them
+        case StatusEncoderFailed: {
+            // The host runs the old values; the target goes back to them, but not
+            // above the ceiling. A running value above the ceiling (a lower ceiling
+            // after a live resize) gets the ceiling again after the wait.
             m_AcceptedKbps = acceptedKbps;
             m_EncoderKbps = encoderKbps;
+            m_RestartMode = true;
             if (acceptedKbps > 0) {
                 setTarget(acceptedKbps < m_Ceiling ? acceptedKbps : m_Ceiling);
             }
-            notifySettle(nowMs, RESTART_SETTLE_MS);
+            m_Resend = acceptedKbps > m_Ceiling;
+            // The wait doubles for each failure in a row: 3 s, 6 s, 12 s ... 60 s
+            uint64_t wait = (uint64_t)RESTART_SETTLE_MS << (m_EncoderFailures < 5 ? m_EncoderFailures : 5);
+            if (wait > ENCODER_FAILED_MAX_WAIT_MS) {
+                wait = ENCODER_FAILED_MAX_WAIT_MS;
+            }
+            m_EncoderFailures++;
+            notifySettle(nowMs, (uint32_t)wait);
             return StatusResult::Accepted;
+        }
         default:
+            // NOT_SUPPORTED, INPUT_ONLY, INVALID or an unknown code
             m_Stopped = true;
             return StatusResult::Stopped;
         }
@@ -677,6 +710,8 @@ private:
     uint32_t m_AcceptedKbps = 0;
     uint32_t m_EncoderKbps = 0;
     bool m_RestartMode = false;
+    bool m_Resend = false;
+    uint32_t m_EncoderFailures = 0;
     uint64_t m_SettleUntilMs = 0;
     uint64_t m_CleanSinceMs = 0;
     uint64_t m_LastBadMs = 0;
