@@ -547,6 +547,8 @@ New `session_t::bitrate` (`src/stream.cpp:373` struct):
 - `restart_mode` (`bool`): set after the first `APPLIED_RESTART` or
   `ENCODER_FAILED`.
 - `last_restart` (`steady_clock::time_point`).
+- `last_release` (`std::optional<steady_clock::time_point>`): the time of the
+  last release, for `RELEASE_INTERVAL` (500 ms).
 - `told` (`std::optional<change_t>`): the values of the newest answer that
   the client uses (`UNCHANGED`, or the result of the request in flight).
 
@@ -573,16 +575,28 @@ Control loop, next to the resize queue drain (`stream.cpp:1516-1620`):
    answer, the told values are the start values. The client resends its
    target after its own 3 s timeout (section 3.5), thus a re-apply of an
    older value does not stay: the resend replaces it.
-2. Release: if `pending` is set, no live resize is busy (a resize request
-   in progress or its display thread runs), and (`!restart_mode` or
-   `now - last_restart >= 2 s`), raise `change_queue` with it, move it to `in_flight` and set
-   `in_flight_since = now`. A new release
-   while `in_flight` is set is allowed: the mail keeps the newest value.
+2. Release: if all of these are true:
+   - `pending` is set;
+   - no live resize is busy (a resize request in progress or its display
+     thread runs);
+   - not (`in_flight` is set and `!restart_mode`): before the first restart,
+     the change in flight can be a restart (AMF, Quick Sync, software), and
+     it must end before the next release;
+   - `!restart_mode` or `now - last_restart >= 2 s`;
+   - `now - last_release >= 500 ms` (`RELEASE_INTERVAL`), or no release
+     before: a client must not make `NvEncReconfigureEncoder()` run at each
+     frame;
+
+   then raise `change_queue` with it, move it to `in_flight` and set
+   `in_flight_since = now` and `last_release = now`. In restart mode, a new
+   release while `in_flight` is set is allowed: the mail keeps the newest
+   value.
 3. Watchdog: if `now - in_flight_since > 5 s`, clear `in_flight` and log a
    warning. (The client has its own 3 s timeout.)
 
 The loop runs at least each 150 ms (`server->iterate(150ms)`,
-`stream.cpp:1631`). Thus a release waits at most 150 ms.
+`stream.cpp:1631`). Thus a release waits at most 150 ms after the conditions
+of step 2 are true.
 
 On session stop (the `STOPPING` branch, `stream.cpp:1484-1500`), clear
 `pending`, `in_flight` and `told`.
