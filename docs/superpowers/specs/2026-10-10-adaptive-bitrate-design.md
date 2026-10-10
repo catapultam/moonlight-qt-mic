@@ -411,20 +411,22 @@ has full windows (8 deltas), no lossy window, no delay and no FEC pressure.
 A bad period starts at the first tick with a lossy window, delay or FEC
 pressure, and ends at the next clean tick. Each settle time (after a status
 `APPLIED`, `APPLIED_RESTART` or `ENCODER_FAILED`, and after a live resize)
-removes the stored value and ends the bad period. Thus the hold does not
-start again after a cut or a settle. A static desktop that stays static has
+removes the stored value and ends the bad period. Thus the hold ends when
+the answer to the first cut arrives (about 1 s after the cut), and a second
+delay or FEC cut needs the current measured bitrate at 40 % or more. A static desktop that stays static has
 a clean measured bitrate of about 1 Mbps, so the hold does not unblock
 rule 3 for it. Rule 5 uses only the current measured bitrate.
 Known limits of the hold:
 - If the measured bitrate falls before the RTT shows delay, the clean ticks
   store the low value, and the hold does not help.
-- A collapse that lasts longer than `APP_LIMITED_HOLD_MS`: after 5 s, rule
-  3 uses the current measured bitrate. If it stays below 40 %, only the
-  loss rule cuts.
+- A collapse that lasts after the first cut: rule 3 uses the current
+  measured bitrate. If it stays below 40 %, only the loss rule cuts, and the
+  RTT baseline does not rebase; it follows only when the 30 s lowest-RTT
+  window ages out.
 - When motion ends, the measured bitrate (a 2.5 s mean) falls slowly, and
   the clean ticks store values that are still high. RTT jitter in the next
-  5 s or so can thus cause one 10 % cut. Then the baseline follows the RTT
-  (rebase).
+  5 s or so can thus cause one 10 % cut. After it, the stream is
+  app-limited, so rule 3 makes no further cut.
 The guard is relative to `encoder_kbps`. Near the floor, a static picture
 can thus still be cut on delay or FEC pressure until `encoder_kbps` is
 about 2.5 times its static rate.
