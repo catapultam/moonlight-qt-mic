@@ -129,9 +129,11 @@ in `Limelight.h`):
 
 Both structs are packed and little endian. The client fills them with `LE32` /
 `LE16`, as `LiSendResizeRequest` does (`ControlStream.c:908-910`). The host
-reads them with `std::memcpy` and `util::endian::little()`, as the resize
-handler does (`src/stream.cpp:1350-1355`), and writes them the same way
-(`send_resize_refused`, `stream.cpp:987-992`).
+reads and writes them byte by byte with shifts
+(`adaptive_bitrate::decode_request()` and `encode_status()` in
+`src/adaptive_bitrate.h`). The bytes on the wire are the same as with
+`std::memcpy` and `util::endian::little()` in the resize handler, and the code
+does not depend on the byte order of the host CPU.
 
 ### 3.3 Encryption path
 
@@ -389,8 +391,9 @@ overlay comes on. The overlay stays as it is, with a new text (section 6.6).
 
 ### 5.1 Bitrate chain (one function)
 
-New `src/adaptive_bitrate.h` and `.cpp`, namespace `adaptive_bitrate`, as
-`src/live_resize.h` is:
+New `src/adaptive_bitrate.h`, namespace `adaptive_bitrate`. It is header
+only (no `.cpp`) and has no other Sunshine dependency, thus its unit test
+builds it alone:
 
 ```
 struct chain_input_t {
@@ -400,6 +403,7 @@ struct chain_input_t {
   int fec_percentage;       // config::stream.fec_percentage
   bool audio_high_quality;  // config.audio.flags[HIGH_QUALITY]
   int audio_channels;
+  bool limit_framerate;     // config::video.limit_framerate
 };
 struct chain_result_t {
   std::int64_t accepted_kbps;  // after the cap
@@ -409,7 +413,8 @@ chain_result_t encoder_bitrate(const chain_input_t &);
 ```
 
 The function does the steps of `rtsp.cpp:1074-1154` in the same order: cap at
-`max_bitrate`, multiply by the warp factor, divide for FEC (when
+`max_bitrate`, multiply by the warp factor (only when `limit_framerate` is
+true and `warp_factor >= 2`, as `rtsp.cpp` does), divide for FEC (when
 `fec_percentage <= 80`), subtract audio (at most 20 %), subtract 500 kbps (at
 most 10 %). `cmd_announce` (`rtsp.cpp:943`) calls it and logs the same lines as today. The
 SDP fallback (`configuredBitrateKbps == 0`, `rtsp.cpp:1068-1070`) stays in
@@ -433,8 +438,9 @@ bitrate_chain` to `stream::config_t` (`src/stream.h:27-29`), next to
 5. Limits: `500 <= configured_kbps <= 1000000`. Else answer `INVALID`. (The
    client UI allows up to 500000 with `unlockBitrate`.)
 6. `encoder_bitrate()` with the stored chain input.
-7. If `encoder_kbps` equals `session->bitrate.encoder_kbps` and no change
-   waits: answer `UNCHANGED` with the current values.
+7. If `encoder_kbps` equals `session->bitrate.encoder_kbps`, `pending` is
+   empty and `in_flight` is empty: answer `UNCHANGED` with the current values.
+   The state stores these values as the told values (section 5.3).
 8. Else store the request in `session->bitrate.pending` (it replaces an
    older pending request) and let the control loop release it (section 5.3).
 
@@ -462,19 +468,36 @@ New `session_t::bitrate` (`src/stream.cpp:373` struct):
 - `in_flight` (`std::optional<change_t>`) and `in_flight_since`
   (`steady_clock::time_point`): the newest released request with no result
   yet.
-- `restart_mode` (`bool`): set after the first `APPLIED_RESTART`.
+- `restart_mode` (`bool`): set after the first `APPLIED_RESTART` or
+  `ENCODER_FAILED`.
 - `last_restart` (`steady_clock::time_point`).
+- `told` (`std::optional<change_t>`): the values of the newest answer that
+  the client uses (`UNCHANGED`, or the result of the request in flight).
 
 Control loop, next to the resize queue drain (`stream.cpp:1516-1620`):
 
 1. Drain `result_queue`. For each result: update `encoder_kbps` and
-   `accepted_kbps` on `APPLIED`/`APPLIED_RESTART`, set `restart_mode` and
-   `last_restart` on `APPLIED_RESTART`, and call `send_bitrate_status()`.
-   Clear `in_flight` only when `result.change.request_id ==
-   in_flight->request_id`. A result for an older request (a newer one was
-   released after it) leaves `in_flight` set.
-2. Release: if `pending` is set and (`!restart_mode` or `now - last_restart >=
-   2 s`), raise `change_queue` with it, move it to `in_flight` and set
+   `accepted_kbps` on `APPLIED`, `APPLIED_RESTART` and `UNCHANGED` (the
+   encode thread gives `UNCHANGED` when the value already runs, section 5.4;
+   the values are then the same). Set `restart_mode` and `last_restart` on
+   `APPLIED_RESTART` and on `ENCODER_FAILED`: a failed restart also costs an
+   encoder start, thus the 2 s interval applies after it. `ENCODER_FAILED`
+   does not change `encoder_kbps` or `accepted_kbps`. Call
+   `send_bitrate_status()`. Clear `in_flight` only when
+   `result.change.request_id == in_flight->request_id`, and then store the
+   running values as the told values. A result for an older request (a newer
+   one was released after it) leaves `in_flight` set.
+   Late result: the watchdog (step 3) can clear a request before its result
+   comes. The client can then get a later answer (for example `UNCHANGED`)
+   with other values. When a result is not for `in_flight`, `pending` and
+   `in_flight` are empty, and the new `encoder_kbps` is not the told encoder
+   value, the state stores the told values in `pending`. The encoder then
+   goes back to the value that the client uses. A newer request replaces
+   this re-apply as any pending request (the newest wins). Before the first
+   answer, the told values are the start values.
+2. Release: if `pending` is set, no live resize is busy (a resize request
+   in progress or its display thread runs), and (`!restart_mode` or
+   `now - last_restart >= 2 s`), raise `change_queue` with it, move it to `in_flight` and set
    `in_flight_since = now`. A new release
    while `in_flight` is set is allowed: the mail keeps the newest value.
 3. Watchdog: if `now - in_flight_since > 5 s`, clear `in_flight` and log a
@@ -484,7 +507,7 @@ The loop runs at least each 150 ms (`server->iterate(150ms)`,
 `stream.cpp:1631`). Thus a release waits at most 150 ms.
 
 On session stop (the `STOPPING` branch, `stream.cpp:1484-1500`), clear
-`pending` and `in_flight`.
+`pending`, `in_flight` and `told`.
 
 ### 5.4 Encode thread: apply the bitrate
 
