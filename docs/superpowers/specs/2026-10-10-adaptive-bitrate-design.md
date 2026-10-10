@@ -330,7 +330,7 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `INC_STEP_NEAR_PCT` | 3 | Increase step near the last failure rate |
 | `STABLE_MS` | 4000 | Clean time before an increase |
 | `NEAR_FAILURE_PCT` | 85 | "Near" means the target is >= 85 % of the last failure rate (memory of 60 s) |
-| `APP_LIMITED_PCT` | 40 | Increase only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %. The end-to-end test with full motion measured only 0.63-0.75 of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
+| `APP_LIMITED_PCT` | 40 | Increase only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %. The end-to-end test with full motion measured only 63-75 % of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
 | `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
 | `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
 | `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
@@ -368,7 +368,7 @@ Rules, in order, at each tick:
    no FEC pressure for `STABLE_MS`, and the measured bitrate is at least
    `APP_LIMITED_PCT` (40 %) of `encoder_kbps`. The gate stops increases on a
    static picture. It is not higher because a stream with full motion
-   measures only 0.63-0.75 of `encoder_kbps` end to end. Step `INC_STEP_PCT`, or
+   measures only 63-75 % of `encoder_kbps` end to end. Step `INC_STEP_PCT`, or
    `INC_STEP_NEAR_PCT` when the target is near `lastFailureKbps`. Cap at the
    ceiling.
 6. Apply the minimum intervals and the dead band. If the decision passes,
@@ -384,6 +384,11 @@ App-limited guard (rule 5): with CBR and filler data off
 picture uses much less than the target. No loss then proves nothing about the
 network. Thus a desktop with no motion stays at its current target. It does
 not climb. A decrease does not need the guard.
+Trade-off of 40 %: content at a constant rate R can probe up until the
+encoder value is about 2.5 R (with 70 % it was 1.43 R), up to the ceiling.
+The next full-motion scene can then go above what the network carries, and
+the loss rule cuts it again. The loss rule and the near-failure steps limit
+this.
 
 ### 4.4 Start
 
@@ -941,7 +946,8 @@ with a fake clock:
 7. FEC pressure only: decrease to 90 %.
 8. Recovery: after `STABLE_MS` with no loss and measured >= 40 %: increase
    by 8 %; near `lastFailureKbps`: increase by 3 %.
-9. App-limited: no loss, measured 20 % of the target: no increase.
+9. App-limited: no loss, measured 20 % of the host encoder value: no
+   increase. At 39 %: no increase; at 41 %: increase.
 10. Floor and ceiling hold.
 11. Dead band: a change below 3 % or 250 kbps is not sent.
 12. Pending request: no new decision until the status or the timeout; a
@@ -1036,7 +1042,7 @@ Steps:
 | R4 | The controller oscillates between two values. | Dead band, minimum intervals, smaller steps near `lastFailureKbps`, settle times. Unit test 8.1 and manual steps 2 to 4. Log every decision. |
 | R5 | The controller lowers the bitrate on Wi-Fi stalls that a lower bitrate does not fix. | D8. Manual test at the remote site of the memory note, or `netem` with bursts. |
 | R6 | An IDR frame after a restart or a resize looks like congestion (burst of packets, short loss). | Settle times (4.3). Unit test 2. |
-| R7 | The app-limited guard keeps a static desktop at a low target after congestion ends. The next motion then has a low bitrate until the controller climbs. | Accepted. The climb is 8 % each 4 s. If too slow: allow a jump to the last good target when the measured bitrate reaches it. |
+| R7 | The app-limited guard keeps a static desktop at a low target after congestion ends. The next motion then has a low bitrate until the controller climbs. | Accepted. The climb is 8 % each 4 s. If too slow: allow a jump to the last good target when the measured bitrate reaches it. With the 40 % guard, light constant motion can also probe up to about 2.5 times its rate (4.3). |
 | R8 | ENet RTT is smoothed and only updates on ACKs, so the delay signal lags. | The ping goes each 100 ms. The loss rules do not need RTT. Check the lag in S2. |
 | R9 | `encode_run` with `config_t &` changes the config of `capture_async` in a place that the live resize code does not expect. | The only field that `encode_run` writes is `bitrate`. The resize revert keeps it (5.4). Host review checks every `config` write. |
 | R10 | Restart path: two restarts close together (resize, then bitrate) cost two IDR frames. | Accepted for non-NVENC (4.6). The host 2 s restart interval limits the rate. |

@@ -261,12 +261,12 @@ static void testBusyStreamIncreases()
     Decision d;
     assert(sim.stepUntilSend(d, 20, 1) > 0 && d.targetKbps == 30000);
     sim.sendAndAnswer(d);
-    sim.s.measuredMbps = 24.0 * 0.65;  // 65 % of encoder 24000
+    sim.s.measuredMbps = 24.0 * 0.41;  // 41 % of encoder 24000, just above the guard
     assert(sim.stepUntilSend(d, 60) > 0);
     assert(d.reason == Reason::Increase && d.targetKbps == 32400);
 }
 
-// A static picture at 10 % of the encoder value: no increase
+// Just below the app-limited guard (39 % of the encoder value): no increase
 static void testStaticStreamNoIncrease()
 {
     Sim sim(40000);
@@ -274,7 +274,7 @@ static void testStaticStreamNoIncrease()
     Decision d;
     assert(sim.stepUntilSend(d, 20, 1) > 0 && d.targetKbps == 30000);
     sim.sendAndAnswer(d);
-    sim.s.measuredMbps = 24.0 * 0.10;
+    sim.s.measuredMbps = 24.0 * 0.39;
     for (int i = 0; i < 120; i++) {
         assert(!sim.step().send);
     }
