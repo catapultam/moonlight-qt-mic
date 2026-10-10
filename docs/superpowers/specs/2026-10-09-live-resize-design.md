@@ -135,10 +135,12 @@ upstream Sunshine owns it.
 - `capture()` (`src/video.cpp:2472`) takes `config_t config` by value. It
   calls `capture_async()` (`src/video.cpp:2354`) when
   `chosen_encoder->flags & PARALLEL_ENCODING`, else `encode_run_sync()`.
-  NVENC, Quick Sync and AMF have `PARALLEL_ENCODING`. The `software`
-  encoder (`src/video.cpp:841`) does not, so with the software encoder the
-  sync path runs. The sync path does not read `mail::resize`, so live
-  resize works only with `PARALLEL_ENCODING` (section 4.5).
+  All Windows encoders (NVENC, Quick Sync, AMF and `software`) set
+  `PARALLEL_ENCODING` (`src/video.cpp:524, 731, 837, 908`), so on the
+  Windows host `capture_async()` handles every resize. The sync path does
+  not read `mail::resize`. Thus the control handler refuses a resize when
+  `PARALLEL_ENCODING` is not set, as a defensive check for other platforms
+  or future encoders (section 4.5).
 - `capture_async` changes only its own copy of `config_t`.
   `session->config.monitor` keeps the size from the stream start. The
   control side must track the current stream size itself (section 4.2).
@@ -353,7 +355,7 @@ the new size from the decoded frame (section 5.4).
 | `MULTIPLE_CLIENTS` | `rtsp_stream::session_count() > 1` (`src/rtsp.cpp:653`). |
 | `SIZE_LIMIT` | Limits in section 4.4. Also when `config.input_only` is set. |
 | `DISPLAY_FAILED` | Step 4 or 5 of section 4.3 failed and the revert ran. |
-| `ENCODER_FAILED` | Section 4.4 step 5. Also, before anything changes, when `!(chosen_encoder->flags & PARALLEL_ENCODING)`: the sync path (software encoder) cannot follow a resize (section 4.1). |
+| `ENCODER_FAILED` | Section 4.4 step 5. Also, before anything changes, when `!(chosen_encoder->flags & PARALLEL_ENCODING)`: the sync path cannot follow a resize. All Windows encoders set this flag, so this is a defensive check for other platforms or future encoders (section 4.1). |
 
 The handler also drops a request whose size equals the current stream size
 that the control side tracks (section 4.2) without a reply. The client does not send
