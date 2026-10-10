@@ -141,6 +141,11 @@ public:
     // Any thread may call it. Returns the snprintf() result.
     int formatBitrateStats(char* output, int length);
 
+    // Counts the bytes and the key frame of a received decode unit for the adaptive
+    // bitrate. drSubmitDecodeUnit() calls it for push decoders, and the FFmpeg decoder
+    // thread for the pull model (FFmpeg never uses the push model). Any thread may call it.
+    void countDecodeUnit(const DECODE_UNIT* du);
+
 signals:
     void stageStarting(QString stage);
 
@@ -392,7 +397,7 @@ private:
     AdaptiveBitrate::Controller m_BitrateController;
     SDL_TimerID m_BitrateTickTimer;
     bool m_BitrateUnsupportedLogged;
-    // Received video bytes of the session; all decoders feed it in drSubmitDecodeUnit()
+    // Received video bytes of the session (all decoders, see countDecodeUnit())
     BandwidthTracker m_BitrateTracker;
     // Copies of the controller state for other threads (overlay, connection warning)
     std::atomic<uint32_t> m_BitrateTargetKbps;

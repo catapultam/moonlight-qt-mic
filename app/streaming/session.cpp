@@ -597,15 +597,23 @@ void Session::applyStreamSize(int width, int height)
 
 uint32_t Session::calculateBitrateCeiling()
 {
-    // Spec 6.1 and D11: a manual bitrate is the ceiling and does not change on a live resize
+    int kbps;
     if (!m_Preferences->autoAdjustBitrate) {
-        return (uint32_t)m_Preferences->bitrateKbps;
+        // Spec 6.1 and D11: a manual bitrate is the ceiling and does not change on a live resize
+        kbps = m_Preferences->bitrateKbps;
+    }
+    else {
+        // The default for the current stream size and the negotiated chroma format (D10)
+        bool yuv444 = (m_ActiveVideoFormat & VIDEO_FORMAT_MASK_YUV444) != 0;
+        kbps = StreamingPreferences::getDefaultBitrate(m_ActiveVideoWidth, m_ActiveVideoHeight,
+                                                       m_ActiveVideoFrameRate, yuv444);
     }
 
-    // The default for the current stream size and the negotiated chroma format (D10)
-    bool yuv444 = (m_ActiveVideoFormat & VIDEO_FORMAT_MASK_YUV444) != 0;
-    return (uint32_t)StreamingPreferences::getDefaultBitrate(m_ActiveVideoWidth, m_ActiveVideoHeight,
-                                                             m_ActiveVideoFrameRate, yuv444);
+    // Spec 6.1: the host answers INVALID below this value, and INVALID stops the controller
+    if (kbps < (int)AdaptiveBitrate::MIN_CEILING_KBPS) {
+        return AdaptiveBitrate::MIN_CEILING_KBPS;
+    }
+    return (uint32_t)kbps;
 }
 
 void Session::startAdaptiveBitrate()
@@ -641,6 +649,9 @@ void Session::startAdaptiveBitrate()
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "Adaptive bitrate: SDL_AddTimer() failed: %s; the bitrate does not change",
                      SDL_GetError());
+        // Also no request on a live resize; the overlay shows "fixed"
+        m_BitrateController.stop();
+        publishBitrateState();
     }
 }
 
@@ -797,12 +808,13 @@ void Session::updateBitrateCeiling()
 
 void Session::publishBitrateState()
 {
-    // With adaptation off, the host runs the start bitrate until the first request.
-    // 0 makes formatBitrateStats() show m_StreamConfig.bitrate.
-    m_BitrateTargetKbps = (m_BitrateController.adaptive() || m_BitrateRequestSent) ? m_BitrateController.targetKbps() : 0;
+    // With adaptation off or a stopped controller, the host runs the start bitrate
+    // until the first request. 0 makes formatBitrateStats() show m_StreamConfig.bitrate.
+    bool running = m_BitrateController.running() && m_BitrateController.adaptive();
+    m_BitrateTargetKbps = (running || m_BitrateRequestSent) ? m_BitrateController.targetKbps() : 0;
     m_BitrateCeilingKbps = m_BitrateController.ceilingKbps();
     m_BitrateEncoderKbps = m_BitrateController.encoderKbps();
-    m_BitrateRunning = m_BitrateController.running() && m_BitrateController.adaptive();
+    m_BitrateRunning = running;
 }
 
 int Session::formatBitrateStats(char* output, int length)
@@ -900,13 +912,20 @@ int Session::drSetup(int videoFormat, int width, int height, int frameRate, void
     return 0;
 }
 
+void Session::countDecodeUnit(const DECODE_UNIT* du)
+{
+    // BandwidthTracker has a mutex and the key frame count is atomic: the main
+    // thread reads both in bitrateTick(), and the overlay in formatBitrateStats().
+    m_BitrateTracker.AddBytes(du->fullLength);
+    if (du->frameType == FRAME_TYPE_IDR) {
+        m_KeyFrameCount++;
+    }
+}
+
 int Session::drSubmitDecodeUnit(PDECODE_UNIT du)
 {
-    // Adaptive bitrate: the measured bitrate and the key frame count cover all decoders
-    s_ActiveSession->m_BitrateTracker.AddBytes(du->fullLength);
-    if (du->frameType == FRAME_TYPE_IDR) {
-        s_ActiveSession->m_KeyFrameCount++;
-    }
+    // Adaptive bitrate: push decoders only. Pull decoders call countDecodeUnit() themselves.
+    s_ActiveSession->countDecodeUnit(du);
 
     // Use a lock since we'll be yanking this decoder out
     // from underneath the session when we initiate destruction.

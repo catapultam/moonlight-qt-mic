@@ -681,6 +681,20 @@ static void testSendFailed()
     }
 }
 
+// stop(): no decision and no request after it, also not for a new ceiling
+static void testStop()
+{
+    Sim sim(40000);
+    sim.c.stop();
+    assert(sim.c.started() && !sim.c.running());
+    for (int i = 0; i < 40; i++) {
+        assert(!sim.step(5, 60, 10).send);
+    }
+    assert(!sim.c.setCeiling(20000, sim.s.nowMs).send);
+    sim.c.start(30000, sim.s.nowMs, true);  // a second start does nothing
+    assert(!sim.c.running());
+}
+
 // Spec 4.5: an unknown status code stops the controller
 static void testUnknownStatus()
 {
@@ -790,6 +804,7 @@ int main()
     testLateAnswer();
     testTimeoutNotAdaptive();
     testSendFailed();
+    testStop();
     testUnknownStatus();
     testRttZero();
     testNotAdaptive();

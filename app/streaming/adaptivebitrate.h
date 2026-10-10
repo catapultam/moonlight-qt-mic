@@ -41,6 +41,7 @@ constexpr uint32_t START_SETTLE_MS = 4000;
 constexpr uint32_t CHANGE_SETTLE_MS = 1000;
 constexpr uint32_t RESTART_SETTLE_MS = 3000;
 constexpr uint32_t FLOOR_KBPS = 1500;              // the floor is min(FLOOR_KBPS, ceiling)
+constexpr uint32_t MIN_CEILING_KBPS = 500;         // the host answers INVALID below this value (spec 5.2, 6.1)
 constexpr double LOSS_WINDOW_PCT = 2;              // a 1 s window with this frame loss is "lossy"
 constexpr double LOSS_HEAVY_PCT = 10;
 constexpr uint32_t LOSS_MIN_FRAMES = 10;           // plan: fewer frames in a window give no loss signal
@@ -555,6 +556,13 @@ public:
             d.reason = Reason::Ceiling;
         }
         return d;
+    }
+
+    // Stops the controller for the session, for example when the session cannot
+    // run the tick timer. No decision and no request after this call.
+    void stop()
+    {
+        m_Stopped = true;
     }
 
     // No decision until nowMs + durationMs; the windows start again

@@ -1,13 +1,15 @@
 # Adaptive bitrate: design
 
 Date: 2026-10-10
-Status: design. No code yet.
+Status: implemented, end-to-end test pending (plan docs/superpowers/plans/2026-10-10-adaptive-bitrate-plan.md).
 
-Repositories (read-only during the design):
+Repositories:
 
-- Client: `~/GitHub/moonlight-qt-mic-lr` (branch with live resize), submodule
-  `moonlight-common-c/moonlight-common-c` at `8aa512c`.
-- Host: `~/GitHub/apollo-microphone`, branch `live-resize` at `c67f621c`.
+- Client: `~/GitHub/moonlight-qt-mic-abr`, branch `adaptive-bitrate`
+  (submodule `moonlight-common-c/moonlight-common-c`, branch
+  `adaptive-bitrate`).
+- Host: `~/GitHub/apollo-microphone` (worktree
+  `~/GitHub/apollo-microphone-abr`), branch `adaptive-bitrate`.
 
 Line numbers are from 2026-10-09. Other work changes these files now (live
 resize automation), so the numbers can move. Search for the named symbol.
@@ -265,7 +267,7 @@ last 12 deltas (3 s at the tick rate): rule 2 needs three 1 s windows.
 | Frames finished and lost | New cumulative counters, changed only in `connectionSawFrame()` (`ControlStream.c`). It reads `lastGoodFrame`, which `connectionReceivedCompleteFrame()` sets as before. Read with new `LiGetVideoFrameCounters()`. One function changes both counters for a frame under one mutex, and the read takes the same mutex, so the pair is consistent and a tick boundary cannot show a false loss | video receive thread | each frame |
 | FEC packets recovered and failed, video packets | `RTP_VIDEO_STATS` (`Limelight.h:948-956`, `LiGetRTPVideoStats()`). `RtpVideoQueue.c` did not count recovered video packets; the client now counts them in `reconstructFrame()` | video receive thread | each packet |
 | RTT and RTT variance | `LiGetEstimatedRttInfo()` (ENet `roundTripTime`, smoothed) | ENet service | each ACK of a reliable packet; the periodic ping is reliable and goes each 100 ms (`ControlStream.c:332, 1500-1512`) |
-| Measured bitrate | New session-owned `BandwidthTracker` (reuse `app/streaming/bandwidth.h`), fed in `Session::drSubmitDecodeUnit` (`session.cpp:630`) with `du->fullLength` | decoder submit thread | each frame; average over the last 2.5 s |
+| Measured bitrate | New session-owned `BandwidthTracker` (reuse `app/streaming/bandwidth.h`), fed with `du->fullLength` by `Session::countDecodeUnit()`. The FFmpeg decoder uses the pull model (`CAPABILITY_PULL_RENDERER`), so `drSubmitDecodeUnit` does not run for it: `FFmpegVideoDecoder::submitDecodeUnit()` calls `countDecodeUnit()` on its decoder thread. `drSubmitDecodeUnit` calls it for push decoders. The decoder tracker `m_BwTracker` is not used: it is per decoder (a live resize makes a new one) and only shows with `DISPLAY_BITRATE` | decoder thread | each frame; average over the last 2.5 s |
 
 Notes:
 
@@ -347,7 +349,8 @@ Rules, in order, at each tick:
    deltas of this time are not a network signal). Return no decision. On the
    first free tick, a resend (sections 3.5 and 4.5) comes before the other
    rules.
-2. Sustained loss: two of the last three 1 s windows are lossy, or one window
+2. Sustained loss: two of the last three 1 s windows are lossy and at least
+   `LOSS_MIN_TICKS` ticks of the 3 s history have loss, or the newest window
    has heavy loss and the RTT shows delay in the same window. Then
    `new = max(FLOOR, min(target * DEC_LOSS, measuredEncoderEquivalent * 0.9))`.
    Store `lastFailureKbps = target` and its time.
@@ -785,6 +788,9 @@ New `Session::calculateBitrateCeiling()`:
   rule covers the host that has no YUV444 (the start-time swap at
   `session.cpp:1972-1988`).
 - `autoAdjustBitrate` off: `m_Preferences->bitrateKbps` (D11).
+- At least `MIN_CEILING_KBPS` (500). The host answers `INVALID` below 500
+  kbps (section 5.2), and `INVALID` stops the controller. A manual or
+  command line bitrate below 500 kbps thus gives a ceiling of 500 kbps.
 - `Controller::setCeiling()` and `onStatus()` clamp to the ceiling that the host
   sent (`accepted_kbps`, section 4.5).
 
@@ -803,7 +809,8 @@ the current target.
 - Tick timer: `SDL_AddTimer(250, ...)` pushes `SDL_CODE_BITRATE_TICK`. Start
   it at the first decoded frame of the session only (section 4.4). Remove it
   when the event loop ends, before `DeferredSessionCleanupTask` calls
-  `LiStopConnection()`. Log an error when `SDL_AddTimer()` fails.
+  `LiStopConnection()`. When `SDL_AddTimer()` fails, log an error
+  and stop the controller for the session (the overlay shows "fixed").
 - Request timeout: the controller checks `REQUEST_TIMEOUT_MS` in its tick. No
   extra timer.
 - `clBitrateStatus` (new static callback, last entry of `k_ConnCallbacks`,
