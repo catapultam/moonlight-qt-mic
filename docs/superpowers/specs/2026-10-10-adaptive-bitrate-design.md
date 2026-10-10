@@ -577,8 +577,11 @@ Known effects and limits:
   while no encoder ran, for example during a reinit) starts a new encoder
   and gives `APPLIED_RESTART`, not `APPLIED`. The host then keeps restart
   mode on, and later in-place changes wait for the 2 s restart interval.
-- In the encode thread, a change with `encoder_kbps <= 0` gives result
-  `UNCHANGED` and a warning log. The host does not start a new encoder.
+- A change with `encoder_kbps <= 0` gives result `ENCODER_FAILED` and a
+  warning log, in the `encode_run` loop and at the top of the
+  `capture_async` loop. The host does not start a new encoder, and the
+  encoder keeps its bitrate. The control thread then counts it as a
+  failed restart: restart mode goes on and the 2 s interval starts.
 - When `make_encode_device` fails in `capture_async`, the function returns
   with no result for a change in progress, and the session stops.
 
