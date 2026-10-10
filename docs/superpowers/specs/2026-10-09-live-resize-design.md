@@ -195,13 +195,31 @@ Mail rules (`src/thread_safe.h`):
 
 Other state:
 
-- `session_t::control` gains `resize_refused` and `resize_done` handles,
-  drained in `controlBroadcastThread` next to `hdr_queue`
-  (`src/stream.cpp:1199-1201`).
-- `session_t` gains `std::atomic<bool> resize_in_progress` and the current
-  stream size (width, height). The control side sets the size at stream
-  start from `config.monitor` and updates it when a resize completes. It
-  must not read `session->config.monitor` for the current size.
+- `session_t::resize` holds the live resize state of the session:
+  - Persistent handles `size_queue` (`mail::resize`), `refused_queue`
+    (`mail::resize_refused`) and `done_queue` (`mail::resize_done`). The
+    control thread drains `refused_queue` and `done_queue` in
+    `controlBroadcastThread` next to `hdr_queue`.
+  - `std::atomic<bool> in_progress`: a request is pending.
+  - `done_seen`: an encoder started after the request.
+  - `std::atomic<std::uint32_t> worker_id`: the id of the display thread
+    that runs now, 0 when none. A global counter gives the ids, thus they
+    are unique across sessions.
+  - `vdd_generation`: the value of `proc::vdd_generation` at the request.
+  - The tracked stream size (`width`, `height`) and the size before the
+    request (`last_width`, `last_height`), `request_id`, `started`.
+  The control side sets the size at stream start from `config.monitor`,
+  sets it to the requested size when a request starts and sets it back to
+  `last_*` on a refusal. It must not read `session->config.monitor` for the
+  current size.
+- `proc::vdd_generation` (`std::atomic<std::uint32_t>`, `src/process.h`):
+  the identity of the virtual display of the running app, 0 when there is
+  none. `execute` sets a new value under `vdd_lock`. `terminate` sets 0
+  before it waits for `vdd_lock` and again under the lock.
+- `stream::session::active_sessions`: the number of sessions in state
+  RUNNING. `start` increments it. `stop` and `graceful_stop` decrement it
+  at the change from RUNNING to STOPPING. (`running_sessions` goes down
+  only in `join`, thus it also counts STOPPING sessions.)
 - `capture_async` keeps `config_t last_good_config` and a flag
   `resize_pending`. Both are local to the capture thread. The control
   thread cannot read them.
@@ -230,8 +248,12 @@ Spikes S1 and S1b set this order: a mode change without a re-add to a size
 that is not in the mode list returns `DISP_CHANGE_BADMODE` (-2), so the
 function does not try it first.
 
-1. Check `proc::proc.vdd.valid` and `proc::proc.virtual_display`. If one is
-   false, return a failure and change nothing (section 4.6).
+1. Check `proc::proc.vdd.valid`, `proc::proc.virtual_display` and that
+   `proc::vdd_generation` has the value of the request. If not, return a
+   failure with `changed == false` and change nothing (section 4.6). After
+   each add and each mode change, check `proc::vdd_generation` again. If
+   it changed (`terminate` started), stop and return a failure with
+   `changed == true`.
 2. `VDISPLAY::removeVirtualDisplay(vdd.guid)` (`virtual_display.cpp:691`).
    A failed remove is not fatal: the add in step 3 returns the existing
    monitor for a known GUID.
@@ -265,9 +287,12 @@ function does not try it first.
 8. Revert is the job of the caller (the worker, section 4.4): on a failure
    it calls `change_display_size()` again with the old size and clears the
    pending size. After a failure, `display_name` and `output_name` still
-   name the old monitor, which can be missing. If the revert also fails,
-   the session has no display and the worker must stop the stream.
-   `src/live_resize.h` lists the state after each result.
+   name the old monitor, which can be missing. The worker reverts only
+   when `changed` is true, and with the generation of the request, thus
+   never the display of another app. If the revert also fails with
+   `changed == true`, the session has no display and the worker calls
+   `session::stop()`. `src/live_resize.h` lists the state after each
+   result.
 
 `target_fps` follows `src/process.cpp:277-287`: take `launch_session->fps`,
 multiply by 1000 when below 1000, double it when
@@ -323,8 +348,11 @@ loop, which it reaches when `encode_run` exits on `reinit_event`.
      encoder start from before the request is not taken as the result.
    - Check `resize_refused` before `resize_done`. After an encoder failure
      the old-size encoder can start and raise `resize_done` too.
-   - On `resize_done` during a resize, set the tracked stream size to the
-     new size and clear `resize_in_progress`.
+   - On `resize_done` during a resize, set `done_seen`. The request is done
+     when `done_seen` is set, the display thread is finished
+     (`worker_id == 0`, read before the queues) and `refused_queue` is
+     empty. Then clear `in_progress`. The tracked size is already the new
+     size.
 8. The new encoder session starts with an IDR. The client also requests an
    IDR after its decoder recreate, so a second IDR is normal.
 
@@ -350,9 +378,9 @@ the new size from the decoded frame (section 5.4).
 
 | Reason | Check |
 |--------|-------|
-| `BUSY` | `session->resize_in_progress` is set. The control side clears it only after `resize_done` or `resize_refused` for the request, or after the watchdog (section 4.6). |
+| `BUSY` | `session->resize.in_progress` is set, or a display thread runs (`worker_id != 0`). The control side clears `in_progress` only after `resize_done` or `resize_refused` for the request, or after the watchdog (section 4.6). |
 | `NOT_VIRTUAL_DISPLAY` | `!proc::proc.virtual_display` (`src/process.h:111`) or `vDisplayDriverStatus != OK` (`src/process.cpp:63`). |
-| `MULTIPLE_CLIENTS` | `rtsp_stream::session_count() > 1` (`src/rtsp.cpp:653`). |
+| `MULTIPLE_CLIENTS` | `stream::session::active_sessions > 1` (sessions in state RUNNING). Not `rtsp_stream::session_count()`: it calls `clear(false)`, which stops and joins STOPPING sessions. `join` waits for `controlEnd`, which only the control thread raises, thus a call on the control thread deadlocks. For the same reason the control thread never calls `rtsp_stream::find_session()`. |
 | `SIZE_LIMIT` | Limits in section 4.4. Also when `config.input_only` is set. |
 | `DISPLAY_FAILED` | Step 4 or 5 of section 4.3 failed and the revert ran. |
 | `ENCODER_FAILED` | Section 4.4 step 5. Also, before anything changes, when `!(chosen_encoder->flags & PARALLEL_ENCODING)`: the sync path cannot follow a resize. All Windows encoders set this flag, so this is a defensive check for other platforms or future encoders (section 4.1). |
@@ -383,16 +411,30 @@ streams the display may resize it. Reviewers may decide to gate it behind
 - Mails are the only channel between the control thread, the worker and
   `capture_async`. The control thread cannot read `resize_pending` or
   `last_good_config`.
-- `resize_in_progress` is set by the control handler and cleared by the
-  control side when the worker is finished and the control thread got
-  `resize_done` or `resize_refused` for the request, whichever is later.
-  Use a small counter or two flags; the reviewer should check that a crash
-  in the worker cannot leave the session blocked. A watchdog clears the
-  flag after 15 seconds. On a watchdog timeout the worker or control side
-  drains `mail::resize` with `pop(0ms)`, so that a later unrelated reinit
-  does not apply a stale size.
+- The session uuid is the client id (`device_uuid`), thus a reconnected
+  client has the same uuid. Each display thread gets a `worker_id`. The
+  handler stores it in `session_t::resize.worker_id`. A display thread
+  acts on the session only when `find_session(uuid)` returns a session
+  with the same `worker_id`. A `util::fail_guard` sets `worker_id` back
+  to 0 (compare and exchange with its own id) at every exit. The thread
+  raises its refusal before this, thus the control thread reads
+  `worker_id` before it drains the queues.
+- `in_progress` is set by the control handler and cleared by the control
+  thread when the display thread is finished and the control thread got
+  `resize_done` (and no refusal is pending) or `resize_refused` for the
+  request. Watchdog, only when the display thread is finished: after 15 s,
+  if `mail::resize` is still in the mail (`pop(0ms)` returns it),
+  `capture_async` did not read the size; the control thread takes it back,
+  sets the tracked size to `last_*` and clears `in_progress`. If
+  `capture_async` read the size, its result belongs to this request: the
+  control thread logs once and waits, so that a late result is not taken
+  for a newer request. After 60 s it clears `in_progress` also then; a
+  later result is dropped and the next request drains the queues.
 - After a refusal from the encoder (`resize_refused` with
-  `encoder_failed`), the worker reverts the display to the old size.
+  `encoder_failed`), the control thread starts `live_resize_revert_worker`
+  with a new `worker_id` and the generation of the request. It changes
+  the display back to the old size. The host is busy until it is
+  finished. If it fails with `changed == true`, the stream stops.
   `capture_async` already restored its `config`.
 - `session::stop` and `proc_t::terminate` while the worker runs: `terminate`
   removes the VDD by GUID (`src/process.cpp:759-767`). If it runs between
@@ -412,8 +454,16 @@ streams the display may resize it. Reviewers may decide to gate it behind
 - The lock is held for up to about 2.5 s of name polling (about 1.26 s for
   each of two adds) plus up to four mode changes: one or two after each add
   (two when `config::video.isolated_virtual_display_option` is set). The
-  mode changes call `ChangeDisplaySettingsExW`, which has no time limit. `terminate` waits for
-  the lock during this time.
+  mode changes call `ChangeDisplaySettingsExW`, which has no time limit.
+  `terminate` sets `proc::vdd_generation` to 0 before it waits for the
+  lock, and `change_display_size()` stops after its current step, thus
+  `terminate` waits for one add (about 1.26 s) or one mode change.
+- Risk: `session::join` has a 10 s hang check (`lifetime::debug_trap`).
+  When the last session ends, `join` calls `proc.pause()` or
+  `proc.running()`, which can call `terminate`. A mode change that does
+  not return holds `vdd_lock`, and the hang check then ends Apollo. The
+  generation check bounds the normal case; it cannot stop a mode change
+  that hangs in Windows.
 
 ### 4.7 headless_mode interaction
 
