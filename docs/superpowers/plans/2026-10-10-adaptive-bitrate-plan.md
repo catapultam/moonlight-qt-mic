@@ -4793,3 +4793,48 @@ git push
 - [ ] **Step 8: Finish the client branches**
 
 Use superpowers:finishing-a-development-branch for the client. The order of the merge: first the submodule branch `adaptive-bitrate` into `master` of `Catapultam-GMG/moonlight-common-c-mic` (so the pointer of the client is on the submodule `master`), then the client branch `adaptive-bitrate` into `master` of `Catapultam-GMG/moonlight-qt-mic`. After the merge, build the main checkout `~/GitHub/moonlight-qt-mic` (the launchers `moonlight-mic` and `moonlight-game` run it) with the build command of Global Constraints and the clean step, and check `ldd app/moonlight | grep placebo`. Ask the user if the worktrees `~/GitHub/moonlight-qt-mic-abr` and `~/GitHub/apollo-microphone-abr`, the prereleases of the `workflow_dispatch` runs (`gh release list -R catapultam/apollo-microphone` with the body line `branch: adaptive-bitrate`) and the release `spike-s1-nvenc-reconfigure` can be removed.
+
+#### End-to-end result
+
+Test date 2026-10-10. Host build `build-31-e5dc6b1` on CPLT-4A (RTX 4090).
+Client on the laptop, wired LAN, HEVC. Stream window 2048x2158, then
+3200x2024. Limits set with `tc` on `ifb0`.
+
+Run 1 (`APP_LIMITED_PCT` 70):
+
+- Step 1, no throttle, 2.5 min: no request.
+- Step 2, 30 Mbit/s: 46000 -> 26382 kbps, reason loss, in 1-2 s, `APPLIED`
+  in place.
+- Step 3, 15 Mbit/s: target down to 7477 kbps.
+- Step 4, limit removed: FAIL. The app-limited guard blocked the increase;
+  measured only 63-75 % of the encoder value with full motion.
+- Delay cuts without loss: no key frame after the in-place change.
+- Step 5, 3 % random loss: the FEC rule (R5) cut the target to about
+  2300 kbps.
+- Step 5, 40 ms delay: one delay cut, then the RTT baseline moved.
+
+Run 2 (`APP_LIMITED_PCT` 40):
+
+- Step 4, recovery after 30 Mbit/s: 31212 -> 64000 kbps in about 1 min 45 s.
+- Step 4, recovery after 3 % loss: 22982 -> 64000 kbps in about 1 min 40 s.
+- Static desktop: measured 0.1-1.3 Mbps, no increase.
+- Step 5, FAIL: on a static desktop with a clean link, delay cuts on RTT
+  jitter took the target from 64000 to 10040 kbps in 2 min.
+
+Run 3 (rule 3 needs the stream not app-limited, with a 5 s hold):
+
+- Step 1, static clean, 2 min: no cut.
+- Step 2, 30 Mbit/s: 64000 -> 32000 -> 23513 kbps, reason loss.
+- Step 4, recovery: back to 64000 kbps in about 80 s.
+- Static after motion: no cut.
+- Session mean: 58470 kbps.
+
+Host log (`sunshine.log`): no "first frame after a bitrate change is an IDR
+frame" line, no `NvEncReconfigureEncoder` failure, no encoder-failed line,
+no runt payload line.
+
+Not run: Step 6, live resize with the hotkey under throttle (manual step).
+The automatic "new limit" requests at stream start ran on their own:
+44000 -> 46000 and 44000 -> 64000, both `APPLIED`. Step 7 (host cap), Step 8
+(adaptation off), Step 9 (stock host), Step 10 (second client) and Step 11
+(non-NVENC encoder) did not run.

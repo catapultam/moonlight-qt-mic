@@ -1,7 +1,7 @@
 # Adaptive bitrate: design
 
 Date: 2026-10-10
-Status: implemented, end-to-end test pending (plan docs/superpowers/plans/2026-10-10-adaptive-bitrate-plan.md).
+Status: implemented (plan docs/superpowers/plans/2026-10-10-adaptive-bitrate-plan.md).
 
 Repositories:
 
@@ -1108,3 +1108,38 @@ client with the controller in "log only" mode against the current host, apply
 the `tc` steps of 8.3, and check that the decisions are correct before the
 host work ends. Spike order: S1 and S2 in parallel. Write the implementation
 plan after both have results.
+
+## 10. Implementation notes
+
+The plan (`docs/superpowers/plans/2026-10-10-adaptive-bitrate-plan.md`,
+"Global Constraints") makes these changes to this spec. Each line is a
+summary; the plan has the full reason.
+
+- `RtpVideoQueue.c` now counts FEC-recovered video packets.
+- `Sample` has finished and lost frame counts, not total and received; it
+  drops `packetsFecFailed` and `rttVarianceMs`.
+- The history holds 12 deltas (3 s), not 8.
+- A window is "delayed" when 3 of its 4 RTT samples pass the threshold.
+- Sustained loss also needs at least 3 ticks with loss in the 3 s history.
+- A window with too few frames, or an FEC window with too few packets,
+  gives no signal.
+- One decrease keeps at least half of the target.
+- The start request stops the controller after 3 tries with no answer.
+- After a delay decrease with no RTT drop, the baseline moves to the
+  current RTT instead of a second decrease.
+- The increase step is at least 250 kbps.
+- The host `bitrate_result` mail is a queue, not an event.
+- The host payload bytes use explicit shifts, not `util::endian::little()`.
+- The host does not release a bitrate change during a live resize.
+- The client status callback data goes through a mutex-protected vector,
+  not one heap struct per event.
+- `--bitrate` on the command line also sets `autoAdjustBitrate` to false.
+- Spike S2 runs inside Task 11, not as a separate task.
+
+Later changes from the end-to-end test (Task 11):
+
+- `APP_LIMITED_PCT` changed from 70 to 40.
+- Rule 3 (delay and FEC decrease) needs the stream to be not app-limited,
+  with a 5 s hold of the last clean measured value.
+- The host release interval is 500 ms. The host does not release a change
+  while the first change is in flight.
