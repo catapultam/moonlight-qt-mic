@@ -566,15 +566,20 @@ not set an automatic target when the window is minimized, when a dimension
 is 0 after the rounding, or when the host has no live resize support (then
 it logs one line per stream and shows no overlay).
 
-Rule for the automatic target: the pump sets an automatic target only when
-the window state changed since the last automatic target. The window state
-is the logical window size (`SDL_GetWindowSize`) and the full-screen flags
-(`SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP`). A drag, a
-tiling change, and full screen on or off change it. The first check after
-the arming has no last state, so the stream start always sets a target. The
-state is recorded only when a target is set. `LiveResize::WindowTrigger` in
-`liveresize.h` (member `m_AutoResizeWindow`) holds the state. The cleanup at
-the end of `Session::exec` resets it.
+Rule for the automatic target: the pump sets a new automatic target only
+when the window state changed since the last automatic target. The window
+state is the logical window size (`SDL_GetWindowSize`) and the full-screen
+flags (`SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP`). A
+drag, a tiling change, and full screen on or off change it. The first check
+after the arming has no last state, so the stream start always sets a
+target. The state is recorded only when a target is set; a failed read of
+the target or a size of 0 is not recorded, so the next pump tries again.
+While an automatic target waits in the slot and is not sent (the debounce,
+a retry), each pump sets it again to the current pixel size. Thus a scale
+change during the debounce does not send the old pixel size.
+`LiveResize::WindowTrigger` in `liveresize.h` (member `m_AutoResizeWindow`,
+functions `wantsTarget()` and `apply()`) holds the state and makes this
+decision. The cleanup at the end of `Session::exec` resets it.
 
 Reason: a change of the pixel size with the same logical size is a scale
 change. PaperWM can scroll the window so that part of it is on a monitor
@@ -584,6 +589,19 @@ size 2456x1619) each time the window crosses the monitor edge. Without the
 rule, each crossing started an automatic request. The target of an
 automatic request is still the pixel size (section 5.3). The manual hotkey
 does not use this rule; it always sends the current pixel size.
+
+Results of this rule that the user sees, and limits:
+
+- When the window moves fully to a monitor with a different scale and its
+  logical size does not change, the stream stays at the old pixel size. The
+  user presses the hotkey to get the new pixel size.
+- After a refusal that is not BUSY, the size is blocked for 60 s (section
+  5.3). When the block expires, the client does not send that size again on
+  its own. Only a change of the window state or the hotkey sends a request.
+- Exclusive full screen: `SDL_GetWindowSize` gives the size of the emulated
+  mode, so the state key uses that size. A change of the desktop mode, or a
+  move to another display with the same mode and the same flags, sets no
+  target. The user presses the hotkey.
 
 The FFmpeg decoder is the only decoder that sends event 111. The Steam Link
 decoder (`slvid.cpp`) does not, so the automatic mode does not arm there.
@@ -971,11 +989,15 @@ pointer in `moonlight-qt-mic`.
   the target (`testControllerSendFailed`); a refusal drops a slot target of
   the same size (`testControllerRefusalDropsSlot`); a refusal for an old
   `request_id` is ignored; a manual request shares the slot, is sent at
-  once, and its refusal is always shown; `reset()`. `testWindowTrigger`
-  tests `WindowTrigger` (section 5.2): the stream start sets a target; the
-  same logical size with a different pixel size does not; a different
-  logical size does; a change of the full-screen flags does, also with the
-  same logical size; `reset()` forgets the state.
+  once, and its refusal is always shown; `reset()`. `testWindowTrigger*`
+  test `WindowTrigger` (section 5.2) with the same calls as the session:
+  the stream start sets a target; the same logical size with a different
+  pixel size does not; a different logical size does; a change of the
+  full-screen flags does, also with the same logical size; `reset()`
+  forgets the state; an automatic target that waits follows a scale change,
+  also after a logical change, and a manual target that waits does not
+  change (`testWindowTriggerRefresh`); a failed read or a size of 0 is not
+  recorded (`testWindowTriggerReadFailed`).
 - common-c: build with `-DUSE_MBEDTLS` off in the toolbox and check that
   `LiSendResizeRequest` returns an error when no connection exists.
 

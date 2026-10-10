@@ -451,23 +451,21 @@ void Session::triggerAutoLiveResize()
         return;
     }
 
-    // Only a change of the logical size or the full-screen mode sets a target.
-    // A change of the pixel size alone is a scale change, for example when
-    // PaperWM scrolls the window partly onto a monitor with a different scale.
+    // Only a change of the logical size or the full-screen mode sets a new
+    // target. A change of the pixel size alone is a scale change, for example
+    // when PaperWM scrolls the window partly onto a monitor with a different
+    // scale. An automatic target that was not sent yet follows the pixel size.
     int logicalWidth, logicalHeight;
     Uint32 fullscreen = flags & SDL_WINDOW_FULLSCREEN_DESKTOP;
     SDL_GetWindowSize(m_Window, &logicalWidth, &logicalHeight);
-    if (!m_AutoResizeWindow.differs(logicalWidth, logicalHeight, fullscreen)) {
+    if (!m_AutoResizeWindow.wantsTarget(m_ResizeState, logicalWidth, logicalHeight, fullscreen)) {
         return;
     }
 
-    if (!getLiveResizeTarget(width, height, false) || width == 0 || height == 0) {
-        // Do not record the state, so that the next pump tries again
-        return;
-    }
-
-    m_AutoResizeWindow.record(logicalWidth, logicalHeight, fullscreen);
-    m_ResizeState.setTarget(width, height, false, SDL_GetTicks());
+    width = height = 0;
+    bool readOk = getLiveResizeTarget(width, height, false);
+    m_AutoResizeWindow.apply(m_ResizeState, logicalWidth, logicalHeight, fullscreen,
+                             readOk, width, height, SDL_GetTicks());
 }
 
 void Session::pumpLiveResize()
@@ -484,7 +482,7 @@ void Session::pumpLiveResize()
 
     // Read the window state again. On some platforms the full-screen flag
     // changes after the last size event. A window state without a change of
-    // the logical size or the full-screen mode sets no target.
+    // the logical size or the full-screen mode sets no new target.
     triggerAutoLiveResize();
 
     int width, height;

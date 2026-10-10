@@ -809,17 +809,15 @@ static void testControllerReset()
     assert(c.wakeDelayMs(5000) == -1);
 }
 
-// The session calls setTarget() only when the window trigger says that the
-// window changed. Returns true when it called setTarget().
-static bool windowEvent(LiveResize::WindowTrigger& t, LiveResize::ResizeController& c,
-                        int logicalW, int logicalH, uint32_t fullscreen, int pixelW, int pixelH, uint32_t now)
+// One pump of the session: the same calls as Session::triggerAutoLiveResize().
+// readOk false: the target read failed. Returns true when a target was set.
+static bool pump(LiveResize::WindowTrigger& t, LiveResize::ResizeController& c,
+                 int logicalW, int logicalH, uint32_t fullscreen, bool readOk, int pixelW, int pixelH, uint32_t now)
 {
-    if (!t.differs(logicalW, logicalH, fullscreen)) {
+    if (!t.wantsTarget(c, logicalW, logicalH, fullscreen)) {
         return false;
     }
-    t.record(logicalW, logicalH, fullscreen);
-    c.setTarget(pixelW, pixelH, false, now);
-    return true;
+    return t.apply(c, logicalW, logicalH, fullscreen, readOk, pixelW, pixelH, now);
 }
 
 static void testWindowTrigger()
@@ -829,8 +827,8 @@ static void testWindowTrigger()
     int w, h;
     bool manual;
 
-    // Stream start: no state yet, so the first check triggers
-    assert(windowEvent(t, c, 2456, 1619, 0, 3070, 2024, 0));
+    // Stream start: no state yet, so the first pump sets a target
+    assert(pump(t, c, 2456, 1619, 0, true, 3070, 2024, 0));
     assert(c.takeSend(2560, 1600, 500, w, h, manual));
     assert(w == 3070 && h == 2024);
     c.sent(w, h, 1, manual);
@@ -838,33 +836,104 @@ static void testWindowTrigger()
 
     // PaperWM scrolls the window across a monitor with another scale: the
     // logical size stays, the pixel size changes. No new target.
-    assert(!windowEvent(t, c, 2456, 1619, 0, 3274, 2158, 1000));
-    assert(!windowEvent(t, c, 2456, 1619, 0, 3070, 2024, 1100));
+    assert(!pump(t, c, 2456, 1619, 0, true, 3274, 2158, 1000));
+    assert(!pump(t, c, 2456, 1619, 0, true, 3070, 2024, 1100));
     assert(!c.takeSend(3070, 2024, 5000, w, h, manual));
     assert(c.wakeDelayMs(5000) == -1);
 
     // A drag or a tiling change: the logical size changes
-    assert(windowEvent(t, c, 2400, 1600, 0, 3000, 2000, 6000));
+    assert(pump(t, c, 2400, 1600, 0, true, 3000, 2000, 6000));
     assert(c.takeSend(3070, 2024, 6500, w, h, manual));
     assert(w == 3000 && h == 2000);
     c.sent(w, h, 2, manual);
     c.ended();
 
     // Full screen on: a different logical size and a full-screen flag
-    assert(windowEvent(t, c, 3072, 1920, 0x1001, 3840, 2400, 7000));
+    assert(pump(t, c, 3072, 1920, 0x1001, true, 3840, 2400, 7000));
 
     // The full-screen flag changes after the last size event, with the same
     // logical size: also a trigger
-    assert(windowEvent(t, c, 3072, 1920, 0x1, 3840, 2400, 7100));
-    assert(!windowEvent(t, c, 3072, 1920, 0x1, 3840, 2400, 7200));
+    assert(pump(t, c, 3072, 1920, 0x1, true, 3840, 2400, 7100));
 
     // Full screen off with the same logical size (a window tiled to the full
     // monitor): a trigger
-    assert(windowEvent(t, c, 3072, 1920, 0, 3840, 2400, 7300));
+    assert(pump(t, c, 3072, 1920, 0, true, 3840, 2400, 7300));
 
     // The end of the stream forgets the state
     t.reset();
     assert(t.differs(3072, 1920, 0));
+}
+
+static void testWindowTriggerRefresh()
+{
+    // A scale change while an automatic target waits: the target follows the
+    // pixel size, so that the old size is not sent
+    LiveResize::WindowTrigger t;
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    assert(pump(t, c, 2456, 1619, 0, true, 3070, 2024, 0));
+    assert(pump(t, c, 2456, 1619, 0, true, 3274, 2158, 300));
+    assert(!c.takeSend(2560, 1600, 500, w, h, manual));
+    assert(c.takeSend(2560, 1600, 800, w, h, manual));
+    assert(w == 3274 && h == 2158);
+    c.sent(w, h, 1, manual);
+
+    // The same pixel size again does not restart the debounce
+    LiveResize::WindowTrigger t2;
+    LiveResize::ResizeController c2;
+    assert(pump(t2, c2, 2456, 1619, 0, true, 3070, 2024, 0));
+    pump(t2, c2, 2456, 1619, 0, true, 3070, 2024, 400);
+    assert(c2.takeSend(2560, 1600, 500, w, h, manual));
+    assert(w == 3070 && h == 2024);
+
+    // A logical change and a scale change close together: the last pixel
+    // size is sent
+    LiveResize::WindowTrigger t3;
+    LiveResize::ResizeController c3;
+    assert(pump(t3, c3, 2456, 1619, 0, true, 3070, 2024, 0));
+    assert(c3.takeSend(2560, 1600, 500, w, h, manual));
+    c3.sent(w, h, 1, manual);
+    c3.ended();
+    assert(pump(t3, c3, 2400, 1600, 0, true, 3000, 2000, 1000));
+    assert(pump(t3, c3, 2400, 1600, 0, true, 3200, 2134, 1100));
+    assert(c3.takeSend(3070, 2024, 1600, w, h, manual));
+    assert(w == 3200 && h == 2134);
+
+    // A manual target that waits is not changed by an automatic pump
+    LiveResize::WindowTrigger t4;
+    LiveResize::ResizeController c4;
+    assert(pump(t4, c4, 2456, 1619, 0, true, 3070, 2024, 0));
+    assert(c4.takeSend(2560, 1600, 500, w, h, manual));
+    c4.sent(w, h, 1, manual);
+    c4.setTarget(3274, 2158, true, 600);
+    assert(!pump(t4, c4, 2456, 1619, 0, true, 3070, 2024, 700));
+    c4.ended();
+    assert(c4.takeSend(3070, 2024, 700, w, h, manual));
+    assert(w == 3274 && h == 2158 && manual);
+}
+
+static void testWindowTriggerReadFailed()
+{
+    // A failed read of the target is not recorded: the next pump tries again
+    LiveResize::WindowTrigger t;
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    assert(!pump(t, c, 3072, 1920, 0x1, false, 0, 0, 0));
+    assert(c.wakeDelayMs(0) == -1);
+    assert(t.differs(3072, 1920, 0x1));
+    assert(pump(t, c, 3072, 1920, 0x1, true, 3840, 2400, 100));
+    assert(c.takeSend(2560, 1600, 600, w, h, manual));
+    assert(w == 3840 && h == 2400);
+
+    // A size of 0 after the rounding is also not recorded
+    LiveResize::WindowTrigger t2;
+    LiveResize::ResizeController c2;
+    assert(!pump(t2, c2, 1, 1, 0, true, 0, 0, 0));
+    assert(t2.differs(1, 1, 0));
 }
 
 int main()
@@ -895,6 +964,8 @@ int main()
     testControllerRefusalDropsSlot();
     testControllerReset();
     testWindowTrigger();
+    testWindowTriggerRefresh();
+    testWindowTriggerReadFailed();
     puts("liveresize_test: all checks passed");
     return 0;
 }

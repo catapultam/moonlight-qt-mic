@@ -304,6 +304,12 @@ public:
         return waitMs(nowMs);
     }
 
+    // True when an automatic target waits in the slot and was not sent
+    bool hasAutoTarget() const
+    {
+        return m_HasTarget && !m_TargetManual;
+    }
+
     // Forgets all state (end of the stream).
     void reset()
     {
@@ -490,28 +496,49 @@ private:
     std::vector<Refusal> m_Refusals;
 };
 
-// The window state at the last automatic trigger. An automatic target is set
-// only when the logical window size or the full-screen mode changes (a drag, a
-// tiling change, full screen on or off). A change of the pixel size alone is a
-// scale change, for example when PaperWM scrolls the window partly onto a
-// monitor with a different scale. It does not set an automatic target. The
-// target itself stays the pixel size.
+// The automatic trigger. It holds the window state at the last automatic
+// target: the logical window size and the full-screen flags. A drag, a tiling
+// change, and full screen on or off change this state. A change of the pixel
+// size alone is a scale change, for example when PaperWM scrolls the window
+// partly onto a monitor with a different scale. It does not set a new
+// automatic target. The target itself is the pixel size.
+//
+// The session calls wantsTarget(). When it is true, the session reads the
+// target and calls apply().
 class WindowTrigger {
 public:
-    // True when there is no state yet (stream start), or when the logical size
-    // or the full-screen flags differ from the last trigger
-    bool differs(int logicalW, int logicalH, uint32_t fullscreenFlags) const
+    // True when the window state changed (or there is no state yet, at stream
+    // start), or when an automatic target that was not sent waits in the
+    // controller. In the second case the target follows the pixel size until
+    // it is sent.
+    bool wantsTarget(const ResizeController& controller, int logicalW, int logicalH, uint32_t fullscreenFlags) const
     {
-        return !m_Valid || logicalW != m_Width || logicalH != m_Height || fullscreenFlags != m_Fullscreen;
+        return differs(logicalW, logicalH, fullscreenFlags) || controller.hasAutoTarget();
     }
 
-    // The session set an automatic target for this window state
-    void record(int logicalW, int logicalH, uint32_t fullscreenFlags)
+    // Sets the automatic target and records the window state. readOk is false
+    // when the session could not read the target. A failed read or a size of
+    // 0 is not recorded, so the next call tries again. Returns true when it
+    // set a target.
+    bool apply(ResizeController& controller, int logicalW, int logicalH, uint32_t fullscreenFlags,
+               bool readOk, int pixelW, int pixelH, uint32_t nowMs)
     {
+        if (!readOk || pixelW == 0 || pixelH == 0) {
+            return false;
+        }
         m_Valid = true;
         m_Width = logicalW;
         m_Height = logicalH;
         m_Fullscreen = fullscreenFlags;
+        controller.setTarget(pixelW, pixelH, false, nowMs);
+        return true;
+    }
+
+    // True when there is no state yet, or when the logical size or the
+    // full-screen flags differ from the recorded state
+    bool differs(int logicalW, int logicalH, uint32_t fullscreenFlags) const
+    {
+        return !m_Valid || logicalW != m_Width || logicalH != m_Height || fullscreenFlags != m_Fullscreen;
     }
 
     // Forgets the state (end of the stream)
