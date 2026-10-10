@@ -40,7 +40,7 @@ the same in `0affdaa6`, except that `src/stream.cpp` from line 1398 and
 | D4 | Size rule: round each dimension down to an even number. Keep the current fps and bitrate. Do nothing when the result equals the current stream size. | 4:2:0 encoders and D3D11 NV12 textures need even sizes. Apollo already masks odd sizes (`src/process.cpp:210`). |
 | D5 | The host replies only on refusal, with a reason code. The client shows the reason in the status overlay for 5 seconds. The client also shows a message when no new-size frame arrives in 10 seconds. | A success needs no message: the new frames are the confirmation. A timeout protects against a lost message. |
 | D6 | The client recreates its decoder and renderer when a decoded frame arrives at the requested size. It uses the existing recreate path (`SDL_RENDER_DEVICE_RESET` handling in `Session::exec`). | All renderers get a clean start at the new size. No per-renderer resize code. |
-| D7 | The host refuses the request when more than one client session is active, when the capture display is not a SudoVDA monitor, when a resize is in progress, or when the size is out of limits. | One VDD serves all sessions. A resize would change the picture for the other clients. |
+| D7 | The host refuses the request when more than one client session is active, when the capture display is not a SudoVDA monitor, or when the size is out of limits. A request that comes while a resize is in progress waits in one pending slot (the latest request wins) and starts when the resize ends (section 4.6). | One VDD serves all sessions. A resize would change the picture for the other clients. |
 | D8 | The hotkey is `Ctrl+Alt+Shift+W`. It works only while a stream is active. | `W` is free in Moonlight, GNOME and PaperWM. Used keys: Q, Z, X, S, M, C, D, V, L, E, K (`app/streaming/input/input.cpp:86-138`). The first choice was `R`, but GNOME uses `Ctrl+Alt+Shift+R` for its screen recorder and takes the key before Moonlight in a windowed stream. |
 | D9 | In windowed and borderless full-screen (`SDL_WINDOW_FULLSCREEN_DESKTOP`) mode the target size is `SDL_GetWindowSizeInPixels()`. In exclusive full-screen (`SDL_WINDOW_FULLSCREEN`) it is the desktop mode of `SDL_GetWindowDisplayIndex()`. | Spike S3 (2026-10-09, GNOME 50, monitors at 100 % and 125 %): windowed and borderless full-screen report the real physical size (3840x2160 on the 4K monitor). Exclusive full-screen reports the emulated mode that Moonlight set (1920x1080), so the desktop mode is necessary there. The window display index was wrong once in S3, so exclusive full-screen with two monitors can pick the wrong monitor. This is an accepted limit. |
 | D10 | The client does not save the new size to the settings. The client has one new setting, `autoliveresize` (section 5.7). It sets the mode (manual hotkey only, or automatic), not a size. | The window size is transient. The saved resolution stays the start size. The first version had no new settings. The user asked for the automatic mode on 2026-10-09, so the spec now has one setting, off by default. |
@@ -82,7 +82,7 @@ Reason codes:
 
 | Code | Name | Client text |
 |------|------|-------------|
-| 1 | `BUSY` | "Host is busy with a resize" |
+| 1 | `BUSY` | "Host is busy with a resize" (the host sends it only when a pending request cannot start in 60 s, section 4.5) |
 | 2 | `NOT_VIRTUAL_DISPLAY` | "Host does not stream a virtual display" |
 | 3 | `MULTIPLE_CLIENTS` | "Another client is connected" |
 | 4 | `SIZE_LIMIT` | "Host rejected the size WxH" |
@@ -217,6 +217,8 @@ Other state:
     request (`last_width`, `last_height`), `request_id`, `started`.
   - `timeout_logged`: the watchdog logged once that the request is late
     (section 4.6). The handler clears it when a request starts.
+  - `pending` (`live_resize::pending_slot_t`): one request that waits for
+    the change in progress (section 4.6). Control thread only.
   The control side sets the size at stream start from `config.monitor`,
   sets it to the requested size when a request starts and sets it back to
   `last_*` on a refusal. It must not read `session->config.monitor` for the
@@ -387,16 +389,19 @@ the new size from the decoded frame (section 5.4).
 
 | Reason | Check |
 |--------|-------|
-| `BUSY` | `session->resize.in_progress` is set, or a display thread runs (`worker_id != 0`). The control side clears `in_progress` only after `resize_done` or `resize_refused` for the request, or after the watchdog (section 4.6). |
+| `BUSY` | Only for a pending request (section 4.6) that could not start within 60 s (`PENDING_TIMEOUT`, 4 x `HOST_TIMEOUT`) after it was first stored. The refusal uses the `request_id` and size of the pending request. A request while a change is in progress (`in_progress` is set, or a display thread runs, `worker_id != 0`) gets no BUSY: it goes into the pending slot. |
 | `NOT_VIRTUAL_DISPLAY` | `!proc::proc.virtual_display` (`src/process.h:111`), `vDisplayDriverStatus != OK` (`src/process.cpp:63`), or `proc::vdd_generation == 0` (no app owns a virtual display now, for example while `terminate` runs). |
 | `MULTIPLE_CLIENTS` | `stream::session::active_sessions > 1` (sessions in state RUNNING). Not `rtsp_stream::session_count()`: it calls `clear(false)`, which stops and joins STOPPING sessions. `join` waits for `controlEnd`, which only the control thread raises, thus a call on the control thread deadlocks. For the same reason the control thread never calls `rtsp_stream::find_session()`. |
 | `SIZE_LIMIT` | Limits in section 4.4. Also when `config.input_only` is set. |
 | `DISPLAY_FAILED` | Step 4 or 5 of section 4.3 failed and the revert ran. |
 | `ENCODER_FAILED` | Section 4.4 step 5. Also, before anything changes, when `!(chosen_encoder->flags & PARALLEL_ENCODING)`: the sync path cannot follow a resize. All Windows encoders set this flag, so this is a defensive check for other platforms or future encoders (section 4.1). |
 
-The handler also drops a request whose size equals the current stream size
-that the control side tracks (section 4.2) without a reply. The client does not send
-such a request (D4), but the host must be safe.
+The handler compares the request with the size that the host targets: the
+size of the request in progress, or the current tracked size (section 4.2)
+when nothing is in progress. When they are equal, the handler does nothing
+and sends no reply. If the pending slot is set, the handler clears it,
+because this request is the latest size that the client wants. The client
+does not send such a request (D4), but the host must be safe.
 
 Permission: the request needs no new `crypto::PERM` bit. The session that
 streams the display may resize it. Reviewers may decide to gate it behind
@@ -433,7 +438,7 @@ streams the display may resize it. Reviewers may decide to gate it behind
   to 0 (compare and exchange with its own id) at every exit. The thread
   raises its refusal before this, thus the control thread reads
   `worker_id` before it drains the queues.
-- `in_progress` is set by the control handler and cleared by the control
+- `in_progress` is set by `start_resize_request` and cleared by the control
   thread when the display thread is finished and the control thread got
   `resize_done` (and no refusal is pending) or `resize_refused` for the
   request. Watchdog, only when the display thread is finished: after 15 s,
@@ -453,8 +458,30 @@ streams the display may resize it. Reviewers may decide to gate it behind
   `encoder_failed`), the control thread starts `live_resize_revert_worker`
   with a new `worker_id` and the generation of the request. It changes
   the display back to the old size. The host is busy until it is
-  finished. If it fails with `changed == true`, the stream stops.
-  `capture_async` already restored its `config`.
+  finished: a new request waits in the pending slot. If it fails with
+  `changed == true`, the stream stops. `capture_async` already restored
+  its `config`.
+- Pending slot (`session_t::resize.pending`, control thread only). A
+  request with a different size while a request is in progress or a
+  display thread runs (`worker_id != 0`, also the revert thread) goes into
+  one slot: size and `request_id`. A newer request overwrites it; the time
+  of the first store stays. Each request that does not go into the slot
+  (it starts, the start path refuses it, or it equals the target size)
+  clears the slot, because it is newer. This also covers a display thread
+  that ends after the drain pass and before the next packet. The checks of
+  section 4.5 run only when the request starts. In each pass, after the
+  refusal drain, the done check and the watchdog, the control thread reads
+  `worker_id` again. When no request is in progress and no display thread
+  runs, it takes the slot and starts it through the same path as a new
+  request (`start_resize_request`), or drops it with no reply when its size
+  equals the current tracked size. Refusals for it use its own
+  `request_id` and size. When the slot cannot start within 60 s after the
+  first store, the control thread refuses it with `BUSY` and clears it.
+  The slot is cleared when the session stops (no reply). The decisions are
+  `apply_request()` and `take_pending()` in `src/live_resize.h`. Known
+  limit: the pending request starts in the same pass in which the 60 s
+  watchdog clears `in_progress`, thus a late result of the old request
+  counts for the pending request (see the watchdog bullet).
 - `session::stop` and `proc_t::terminate` while the worker runs: `terminate`
   removes the VDD by GUID (`src/process.cpp:759-767`). If it runs between
   worker step 2 (remove) and step 3 (add), the worker re-adds a monitor
@@ -888,11 +915,18 @@ pointer in `moonlight-qt-mic`.
 
 ### 7.1 Automatic tests on Linux
 
-- Host: `tests/unit/test_stream.cpp` exists (googletest). Add tests for a
-  pure function `video::validate_resize(config_t, w, h) -> reason` (even,
-  limits per codec, no-op detection) and for the payload struct sizes
-  (`sizeof(control_resize_request_t) == 4 + 8`). The host test target builds
-  on Linux with the repository `tests/CMakeLists.txt`. The Windows workflow in
+- Host: `tests/unit/test_live_resize.cpp` (googletest) tests the
+  header-only `src/live_resize.h`: the payload sizes and packet ids,
+  `validate_size()` (even, limits per codec, input only), and the pending
+  slot: `decide_request()`, `pending_slot_t` (latest wins, the first store
+  time stays, 60 s expiry), `apply_request()` (store while busy; ignore and
+  start clear the slot, also a start while the slot is set) and
+  `take_pending()` (waits for the request and the display thread, drops the
+  current size, BUSY after 60 s with the latest id, the drain order starts
+  only the latest request once). It builds without the rest of Apollo:
+  `g++ -std=c++20 -Wall -Werror -I . -I third-party/googletest/googletest/include
+  tests/unit/test_live_resize.cpp -L <gtest build dir> -lgtest -lgtest_main
+  -pthread`. The repository `tests/CMakeLists.txt` also builds it. The Windows workflow in
   section 6.1 does not run tests; run them locally in a Linux build or add a
   Linux job later.
 - Client: `moonlight-qt` has no test target. `app/tests/liveresize_test.cpp`
@@ -984,7 +1018,7 @@ implementation.
 | R5 | The encoder rejects the new size and `capture_async` spins (pre-existing bug made reachable). | Section 4.4 step 5 adds the revert. Test it by sending a size above the H.264 limit with the limit check disabled. |
 | R6 | The decoded frame at the new size reaches a renderer before the recreate and crashes `SdlRenderer`. | Section 5.4 drops the frame. Test with `--video-decoder software` and the SDL renderer path forced. |
 | R7 | On GNOME Wayland `SDL_GetWindowSizeInPixels` reports a size that differs from the real buffer with fractional scaling, or the full-screen value is the emulated mode. | Resolved by spike S3 (2026-10-09): windowed and borderless full-screen sizes are physical pixels at 100 % and 125 % scale (window size, pixel size and Vulkan drawable size are equal). Exclusive full screen reports the emulated mode; D9 uses the desktop mode there. |
-| R8 | A refusal arrives after the timeout, or two requests interleave. | `request_id` matching (section 3.1) and the pending state machine. Unit test the state transitions. |
+| R8 | A refusal arrives after the timeout, or two requests interleave. | `request_id` matching (section 3.1), the client state machine (section 5.3) and the host pending slot (section 4.6). Unit test the state transitions on both sides. |
 | R9 | The control stream is not encrypted (old protocol) and the request goes out in plain text. | `LiSendResizeRequest` returns an error unless `encryptedControlStream` is set. The host already drops plain messages on protocol 13 (`src/stream.cpp:571`). |
 | R10 | The mic stream (`MicrophoneStream.c`) or audio resets during the host reinit. | The reinit touches only video. Check in the manual test step 11. The memory note warns that `sdlaud.cpp` debug asserts fire when the renderer reinits with the mic on; run the test with a release build and watch for the assert in a debug build. |
 | R11 | `proc_t::terminate` removes the VDD by GUID after a failed worker left no monitor. | `removeVirtualDisplay` on a missing GUID returns `STATUS_NOT_FOUND`, which `terminate` already logs as a warning (`src/process.cpp:763-767`). No crash. |
