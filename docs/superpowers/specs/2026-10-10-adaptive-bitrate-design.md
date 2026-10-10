@@ -210,13 +210,11 @@ It returns a decision.
 ```
 struct Sample {
     uint64_t nowMs;
-    uint32_t framesTotal;      // cumulative, from LiGetVideoFrameCounters()
-    uint32_t framesReceived;   // cumulative
+    uint32_t framesFinished;   // cumulative, from LiGetVideoFrameCounters()
+    uint32_t framesLost;       // cumulative
     uint32_t packetsVideo;     // cumulative, RTP_VIDEO_STATS.packetCountVideo
     uint32_t packetsFecRecovered;  // cumulative
-    uint32_t packetsFecFailed;     // cumulative
     uint32_t rttMs;            // 0 when not known
-    uint32_t rttVarianceMs;
     double measuredMbps;       // received video payload, without FEC
 };
 
@@ -239,8 +237,8 @@ last 8 deltas (2 s at the tick rate).
 
 | Signal | Source | Writer thread | Update rate |
 |--------|--------|---------------|-------------|
-| Frames total and received | New cumulative counters in `connectionSawFrame()` and `connectionReceivedCompleteFrame()` (`ControlStream.c:466, 506`), read with new `LiGetVideoFrameCounters()` | video receive thread | each frame |
-| FEC packets recovered and failed, video packets | `RTP_VIDEO_STATS` (`Limelight.h:948-956`, `LiGetRTPVideoStats()`) | video receive thread | each packet |
+| Frames finished and lost | New cumulative counters in `connectionSawFrame()` and `connectionReceivedCompleteFrame()` (`ControlStream.c:466, 506`), read with new `LiGetVideoFrameCounters()`. One function updates both counters for a frame, so a tick boundary cannot show a false loss | video receive thread | each frame |
+| FEC packets recovered and failed, video packets | `RTP_VIDEO_STATS` (`Limelight.h:948-956`, `LiGetRTPVideoStats()`). `RtpVideoQueue.c` did not count recovered video packets; the client now counts them in `reconstructFrame()` | video receive thread | each packet |
 | RTT and RTT variance | `LiGetEstimatedRttInfo()` (ENet `roundTripTime`, smoothed) | ENet service | each ACK of a reliable packet; the periodic ping is reliable and goes each 100 ms (`ControlStream.c:332, 1500-1512`) |
 | Measured bitrate | New session-owned `BandwidthTracker` (reuse `app/streaming/bandwidth.h`), fed in `Session::drSubmitDecodeUnit` (`session.cpp:630`) with `du->fullLength` | decoder submit thread | each frame; average over the last 2.5 s |
 
@@ -725,9 +723,11 @@ the current target.
 
 - `ControlStream.c`: ids and tables (3.3), `LiSendBitrateRequest()`, async
   callback, cumulative frame counters and `LiGetVideoFrameCounters(uint32_t*
-  total, uint32_t* received)`. Reset the counters in the init function of
+  finishedFrames, uint32_t* lostFrames)`. Reset the counters in the init function of
   the control stream with the other statics.
 - `RtspConnection.c`: parse `x-ss-general.dynamicBitrate`.
+- `RtpVideoQueue.c`: count recovered video data packets in
+  `RTP_VIDEO_STATS::packetCountFecRecovered`.
 - `Limelight.h`: `LI_BITRATE_STATUS_*`, callback typedef and field,
   `LiSendBitrateRequest`, `LiIsDynamicBitrateSupported`,
   `LiGetVideoFrameCounters`.
