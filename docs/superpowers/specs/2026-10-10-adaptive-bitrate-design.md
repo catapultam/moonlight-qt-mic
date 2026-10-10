@@ -192,13 +192,20 @@ global `DynamicBitrateSupported`. Expose `bool LiIsDynamicBitrateSupported(void)
   4.2). The host answers for the request that took effect. It does not answer
   for a request that a newer one replaced before it took effect.
 - Client rule: only a `BITRATE_STATUS` with `request_id == pending id` ends
-  the pending request. The client logs and ignores each other status: an
-  older id, id 0, a status with no pending request, and a re-apply status
-  (section 5.3) that has the id of an older request. The host sends id 0 for
-  a re-apply of the start values (no answer before).
-- Client timeout: 3 s without an answer ends the pending request. The client
-  does not change its state on a timeout. The next tick can send a new
-  request.
+  the pending request. One more status is accepted: a late answer for the
+  request that timed out, while no other request is pending (it shows the
+  real host state). The client accepts each id one time. The client logs and
+  ignores each other status: an older id, id 0, a repeated answer, and a
+  re-apply status (section 5.3) that has the id of an older request. The host
+  sends id 0 for a re-apply of the start values (no answer before).
+- Client timeout: 3 s without an answer ends the pending request. The target
+  stays at the value of the request. The host can run another value (its
+  watchdog and its re-apply, section 5.3). Thus, on the next free tick (rule
+  1), the client sends the same target again (reason `resend`), with no dead
+  band and no minimum interval. A repeated request is safe (see above), and
+  this newer request replaces a host re-apply. If the late answer comes
+  before that tick, the client uses it and does not send again. A timeout of
+  the start request (section 4.4) sends the start request again instead.
 
 ## 4. Controller
 
@@ -223,17 +230,31 @@ struct Sample {
 struct Decision {
     bool send;                 // true: send SET_BITRATE with targetKbps
     uint32_t targetKbps;       // configured kbps
+    uint32_t fromKbps;
     Reason reason;             // for the log and the overlay
+    bool isolated;             // rule 4
+    bool rebased;              // the RTT baseline is now the current RTT
+    bool timedOut;             // the pending request timed out
+    uint32_t timedOutRequestId;
+    bool stopped;              // the start request got no answer 3 times
+    double lossPct[2];         // log signals (section 6.7)
+    uint32_t rttMs;
+    uint32_t rttBaselineMs;
+    double fecPct;
+    double measuredMbps;
 };
 ```
 
-Methods: `start(ceilingKbps, nowMs)`, `tick(const Sample&)`,
-`setCeiling(kbps, nowMs)` (live resize or clamp), `onStatus(requestId,
-status, acceptedKbps, encoderKbps, nowMs)`, `onTimeout(requestId)`,
-`notifySettle(nowMs, durationMs)`.
+Methods: `start(ceilingKbps, nowMs, adaptive)`, `tick(const Sample&)`,
+`sent(decision, requestId, nowMs)`, `setCeiling(kbps, nowMs)` (live resize
+or clamp), `onStatus(requestId, status, requestedKbps, acceptedKbps,
+encoderKbps, nowMs)`, `notifySettle(nowMs, durationMs)`. `adaptive == false`
+(D12): no rule runs, and only `setCeiling()` and a resend after a timeout
+make requests. There is no `onTimeout()`: `tick()` finds the timeout and
+reports it in `Decision::timedOut` (section 6.2).
 
 The controller works with deltas of the cumulative counters. It keeps the
-last 8 deltas (2 s at the tick rate).
+last 12 deltas (3 s at the tick rate): rule 2 needs three 1 s windows.
 
 ### 4.2 Signals and update rates
 
@@ -262,9 +283,10 @@ Notes:
   The existing 3 s loss check of common-c counts these frames the same way.
   The controller does not have a special case for them. The rules absorb
   them as follows: after `APPLIED_RESTART` and after a live resize,
-  `RESTART_SETTLE_MS` (3 s) blocks decisions (rule 1); when it ends, the
-  three 1 s windows of rule 2 contain the frames that the IDR wait
-  dropped in at most one window, and one lossy window gives no change (rule 4). A single IDR wait at another time (for example a decoder
+  `RESTART_SETTLE_MS` (3 s) blocks decisions (rule 1), and rule 1 clears
+  the windows. Thus the frames that the IDR wait dropped during the settle
+  time do not count. Frames that it drops after the settle time come in at
+  most one window, and one lossy window gives no change (rule 4). A single IDR wait at another time (for example a decoder
   error) usually lasts less than one 1 s window, so it gives one lossy
   window at most, and rule 4 makes no change. An IDR wait that follows a
   real network loss adds lost frames to that loss; this makes the loss
@@ -290,12 +312,13 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `TICK_MS` | 250 | Tick period |
 | `START_SETTLE_MS` | 4000 | No decision after the first decoded frame. Common-c also ignores the first 3 s (`ControlStream.c:513-521`). |
 | `CHANGE_SETTLE_MS` | 1000 | No decision after a status `APPLIED`. The queue in the network needs time to drain. |
-| `RESTART_SETTLE_MS` | 3000 | No decision after `APPLIED_RESTART` or a live resize (IDR frame, decoder recreate). |
+| `RESTART_SETTLE_MS` | 3000 | No decision after `APPLIED_RESTART`, `ENCODER_FAILED` or a live resize (IDR frame, decoder recreate). |
 | `FLOOR_KBPS` | `min(1500, ceiling)` | Lowest target. An absolute value: the network capacity does not depend on the stream size, so (b) wins over (a). |
 | `LOSS_WINDOW_PCT` | 2 | A 1 s window with frame loss >= 2 % is "lossy" |
 | `LOSS_HEAVY_PCT` | 10 | Heavy loss |
 | `FEC_RECOVERED_PCT` | 3 | FEC recovered packets / video packets over 2 s >= 3 % is "FEC pressure" |
-| `RTT_RISE_MS` | `max(15, baseline / 2)` | RTT above the baseline by this is "delay" |
+| `RTT_RISE_MIN_MS` | 15 | An RTT sample above `baseline + max(RTT_RISE_MIN_MS, baseline / 2)` is "delayed" |
+| `RTT_DELAY_SAMPLES` | 3 | A 1 s window shows "delay" when this many of its 4 RTT samples are delayed |
 | `RTT_BASELINE_MS` | 30000 | The baseline is the lowest RTT in the last 30 s |
 | `DEC_LOSS` | 0.75 | Multiplier on sustained loss |
 | `DEC_DELAY` | 0.90 | Multiplier on sustained delay or FEC pressure |
@@ -304,15 +327,24 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `STABLE_MS` | 4000 | Clean time before an increase |
 | `NEAR_FAILURE_PCT` | 85 | "Near" means the target is >= 85 % of the last failure rate (memory of 60 s) |
 | `APP_LIMITED_PCT` | 70 | Increase only when the measured bitrate is >= 70 % of `encoder_kbps` |
-| `DEAD_BAND` | `max(3 %, 250 kbps)` | Smaller changes are not sent, except a change to the floor or the ceiling |
-| `MIN_DEC_INTERVAL_MS` | 1000 (in place), 3000 (restart) | Between two decreases |
-| `MIN_INC_INTERVAL_MS` | 4000 (in place), 15000 (restart) | Between two increases |
+| `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
+| `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
+| `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
 | `REQUEST_TIMEOUT_MS` | 3000 | Pending request timeout |
+| `LOSS_MIN_FRAMES` | 10 | A 1 s window with fewer frames gives no loss signal |
+| `LOSS_MIN_TICKS` | 3 | Sustained loss also needs this many ticks with loss in the 3 s history |
+| `FEC_MIN_PACKETS` | 200 | A 2 s window with fewer video packets gives no FEC signal |
+| `MEASURED_MARGIN` | 0.9 | Rule 2: measured bitrate x 0.9 |
+| `MAX_CUT` | 0.5 | One decrease keeps at least half of the target |
+| `START_ATTEMPTS` | 3 | Start requests with no answer before the controller stops |
+| `ENCODER_FAILED_MAX_WAIT_MS` | 60000 | Longest wait after `ENCODER_FAILED` results in a row (section 4.5) |
 
 Rules, in order, at each tick:
 
-1. If a request is pending, or a settle time runs, update the windows only.
-   Return no decision.
+1. If a request is pending, or a settle time runs, clear the windows (the
+   deltas of this time are not a network signal). Return no decision. On the
+   first free tick, a resend (sections 3.5 and 4.5) comes before the other
+   rules.
 2. Sustained loss: two of the last three 1 s windows are lossy, or one window
    has heavy loss and the RTT shows delay in the same window. Then
    `new = max(FLOOR, min(target * DEC_LOSS, measuredEncoderEquivalent * 0.9))`.
@@ -335,9 +367,10 @@ Rules, in order, at each tick:
 6. Apply the minimum intervals and the dead band. If the decision passes,
    return `send = true`.
 
-Restart mode: when the last status was `APPLIED_RESTART`, the controller uses
-the restart intervals and doubles the step sizes. Thus there are fewer IDR
-frames.
+Restart mode: after the first `APPLIED_RESTART` or `ENCODER_FAILED`, the
+controller uses the restart intervals and doubles the increase steps for the
+rest of the session (the host also keeps restart mode on, section 5.3). Thus
+there are fewer IDR frames.
 
 App-limited guard (rule 5): with CBR and filler data off
 (`insert_filler_data = false`, `src/nvenc/nvenc_config.h:50`), a static
@@ -374,8 +407,17 @@ not climb. A decrease does not need the guard.
   client logs it once.
 - `INVALID`: the client has a bug. Log at error level and stop the
   controller.
-- `ENCODER_FAILED`: the target goes back to the value before the request.
-  The controller waits `RESTART_SETTLE_MS`, then follows the normal rules.
+- An unknown status code: stop the controller, as for `INVALID`.
+- `ENCODER_FAILED`: the target goes back to the value that runs
+  (`accepted_kbps`, section 3.1), but not above the ceiling. Restart mode goes
+  on. The controller waits, then follows the normal rules. The wait is
+  `RESTART_SETTLE_MS` (3 s) and doubles for each `ENCODER_FAILED` in a row
+  (3 s, 6 s, 12 s ... at most `ENCODER_FAILED_MAX_WAIT_MS`, 60 s). An
+  `APPLIED`, `APPLIED_RESTART` or `UNCHANGED` status resets the wait to 3 s.
+  Thus a host that cannot restart its encoder gets few requests.
+- `ENCODER_FAILED` with a running value above the ceiling (a live resize
+  lowered the ceiling, section 4.6): after the wait, the controller sends the
+  ceiling again (reason `resend`).
 
 ### 4.6 Live resize
 
@@ -526,7 +568,9 @@ Control loop, next to the resize queue drain (`stream.cpp:1516-1620`):
    value, the state stores the told values in `pending`. The encoder then
    goes back to the value that the client uses. A newer request replaces
    this re-apply as any pending request (the newest wins). Before the first
-   answer, the told values are the start values.
+   answer, the told values are the start values. The client resends its
+   target after its own 3 s timeout (section 3.5), thus a re-apply of an
+   older value does not stay: the resend replaces it.
 2. Release: if `pending` is set, no live resize is busy (a resize request
    in progress or its display thread runs), and (`!restart_mode` or
    `now - last_restart >= 2 s`), raise `change_queue` with it, move it to `in_flight` and set
@@ -807,7 +851,7 @@ bitrate). Else keep the current text. The owner logic
 Info, one line for each decision that sends a request:
 
 ```
-Adaptive bitrate: 60000 -> 45000 kbps (loss 4.1% 3.2%, rtt 38/22 ms, fec 1.2%, measured 52.3 Mbps)
+Adaptive bitrate: 60000 -> 45000 kbps, reason loss (loss 4.1% 3.2%, rtt 38/22 ms, fec 1.2%, measured 52.3 Mbps)
 ```
 
 Info for each status (status name, accepted, encoder kbps). Debug for an
@@ -867,6 +911,13 @@ with a fake clock:
 16. Start: the first tick after `START_SETTLE_MS` sends the ceiling also when
     it equals the start bitrate; no other decision before its status.
 17. A second `start()` (decoder recreate) changes nothing.
+18. `ENCODER_FAILED`: the target goes back, the rules start again after the
+    wait; after a lower ceiling the ceiling is sent again; the wait doubles
+    up to 60 s and an applied status resets it.
+19. Timeout: the next free tick sends the target again (also with adaptive
+    off); a late answer before that tick is accepted and stops the resend.
+20. An unknown status code stops the controller. An RTT of 0 at all times
+    gives no delay signal, and the loss rule still works.
 
 ### 8.2 Protocol tests
 
