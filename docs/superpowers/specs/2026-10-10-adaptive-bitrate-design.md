@@ -545,21 +545,23 @@ taken with the other events at `video.cpp:1954`.
 In `capture_async` (`video.cpp:2361`):
 
 - At the top of the loop, next to the resize pop (`video.cpp:2409-2415`):
-  if `bitrate_restart` is set, `previous_bitrate = config.bitrate;
-  config.bitrate = bitrate_restart->encoder_kbps; bitrate_pending = true`.
-  Also pop `mail::bitrate` here (a request that came while no encoder ran)
-  and handle it the same way.
+  pop `mail::bitrate` (a request that came while no encoder ran); it
+  replaces `bitrate_restart`, because it is newer. If `bitrate_restart` is
+  set, `previous_bitrate = config.bitrate; config.bitrate =
+  bitrate_restart->encoder_kbps; bitrate_applying = bitrate_restart;
+  bitrate_restart.reset()`. Thus the top of the loop clears
+  `bitrate_restart` when it takes it.
+- `encode_run` gets `bitrate_applying`. At the `resize_done` raise point
+  (`video.cpp:1924`), the new encoder runs: when `bitrate_applying` is set,
+  raise result `APPLIED_RESTART` there.
 - After `encode_run`, next to the resize failure check
-  (`video.cpp:2458-2465`): if `encoder_failed` and `bitrate_pending`, set
-  `config.bitrate = previous_bitrate` and raise result `ENCODER_FAILED`. If
-  `bitrate_pending` and the encoder started, raise `APPLIED_RESTART`. To know
-  that the encoder started, use the `resize_done` raise point in
-  `encode_run` (`video.cpp:1924`): raise `APPLIED_RESTART` there when the
-  restart flag is set.
-- Always clear `bitrate_pending` and `bitrate_restart` after `encode_run`
-  returns and after the checks above, as the resize code clears
-  `resize_pending` (`video.cpp:2465`). Else a later restart uses a stale flag
-  and the failure revert uses a wrong value.
+  (`video.cpp:2458-2465`): if `encoder_failed` and `bitrate_applying`, set
+  `config.bitrate = previous_bitrate` and raise result `ENCODER_FAILED`.
+- After `encode_run` returns and after the checks above, always clear
+  `bitrate_applying`, as the resize code clears `resize_pending`
+  (`video.cpp:2465`). Else a later failure reverts a wrong value. Do not
+  clear `bitrate_restart` there: `encode_run` sets it when it breaks for a
+  restart, and the next loop pass takes it.
 - The live resize revert (`config = last_good_config`, `video.cpp:2462`)
   restores the size. It must keep the newest bitrate: `int keep =
   config.bitrate; config = last_good_config; config.bitrate = keep;`.
@@ -568,6 +570,17 @@ An encoder restart in this path does not set `reinit_event`. `capture_async`
 loops, takes the same display, and calls `make_encode_device` and
 `encode_run` again. The new session starts with an IDR. The capture thread
 and the other sessions do not see it.
+
+Known effects and limits:
+
+- On NVENC, a change that the top of the `capture_async` loop takes (it came
+  while no encoder ran, for example during a reinit) starts a new encoder
+  and gives `APPLIED_RESTART`, not `APPLIED`. The host then keeps restart
+  mode on, and later in-place changes wait for the 2 s restart interval.
+- In the encode thread, a change with `encoder_kbps <= 0` gives result
+  `UNCHANGED` and a warning log. The host does not start a new encoder.
+- When `make_encode_device` fails in `capture_async`, the function returns
+  with no result for a change in progress, and the session stops.
 
 ### 5.5 NVENC: change points in `nvenc_base`
 
@@ -658,8 +671,9 @@ change.
 
 ### 5.8 Logs
 
-- Info: each applied change: `Bitrate request <id>: <configured> kbps ->
-  encoder <encoder> kbps (in place|restart)`.
+- Info: each applied change: `Bitrate request <id>: <accepted> kbps ->
+  encoder <encoder> kbps (in place|restart)`. `<accepted>` is
+  `accepted_kbps` (the configured value after the host cap).
 - Info: `UNCHANGED`, `INVALID`, `NOT_SUPPORTED`, `ENCODER_FAILED`.
 - Debug: a pending request that a newer one replaces.
 
