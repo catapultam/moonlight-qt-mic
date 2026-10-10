@@ -191,9 +191,11 @@ global `DynamicBitrateSupported`. Expose `bool LiIsDynamicBitrateSupported(void)
   value, and `raise()` replaces a value that nobody read (live resize spec
   4.2). The host answers for the request that took effect. It does not answer
   for a request that a newer one replaced before it took effect.
-- Client rule: a `BITRATE_STATUS` with `request_id >= pending id` ends the
-  pending request. A status with a smaller id is old: the client logs it and
-  ignores it.
+- Client rule: only a `BITRATE_STATUS` with `request_id == pending id` ends
+  the pending request. The client logs and ignores each other status: an
+  older id, id 0, a status with no pending request, and a re-apply status
+  (section 5.3) that has the id of an older request. The host sends id 0 for
+  a re-apply of the start values (no answer before).
 - Client timeout: 3 s without an answer ends the pending request. The client
   does not change its state on a timeout. The next tick can send a new
   request.
@@ -361,8 +363,12 @@ not climb. A decrease does not need the guard.
 
 ### 4.5 Host refusal and limits
 
-- `accepted_kbps < requested_kbps`: the host cap is lower. The controller sets
-  the ceiling to `accepted_kbps` for the rest of the session.
+- `accepted_kbps < requested_kbps` in an `APPLIED`, `APPLIED_RESTART` or
+  `UNCHANGED` status: the host cap is lower. The controller sets the ceiling
+  to `accepted_kbps` for the rest of the session. Do not use this rule for
+  `ENCODER_FAILED` or another refusal: these statuses give the values that
+  run now (section 3.1), thus `accepted_kbps` can be lower than
+  `requested_kbps` with no host cap.
 - `UNCHANGED`: the controller takes the value as applied.
 - `NOT_SUPPORTED` or `INPUT_ONLY`: the controller stops for the session. The
   client logs it once.
@@ -393,6 +399,12 @@ The request goes after the size change, not before. A request before the
 resize gives a wrong bitrate when the host refuses the resize. On
 non-NVENC hosts, this costs a second encoder restart (one more IDR) after the
 resize restart. Accepted.
+
+The host releases a bitrate change only when no resize is busy (section 5.3),
+but it checks this only at the release. A resize that starts after the
+release can share one encoder restart with the bitrate change. If that
+encoder fails, both changes go back: the client gets `RESIZE_REFUSED` and
+`ENCODER_FAILED`. Both answers are correct. Accepted.
 
 ### 4.7 Poor connection overlay
 
@@ -434,8 +446,9 @@ most 10 %). `cmd_announce` (`rtsp.cpp:943`) calls it and logs the same lines as 
 SDP fallback (`configuredBitrateKbps == 0`, `rtsp.cpp:1068-1070`) stays in
 `cmd_announce`: the dynamic path never sees it.
 
-`cmd_announce` stores `chain_input_t` (without `configured_kbps`) in the
-launch session config, so the control handler can call the function with the
+`cmd_announce` stores `chain_input_t` (with the `configured_kbps` of the
+stream start, which `session::alloc` uses for the start `accepted_kbps`) in
+the launch session config, so the control handler can call the function with the
 same audio, FEC and warp values. Add the field `adaptive_bitrate::chain_input_t
 bitrate_chain` to `stream::config_t` (`src/stream.h:27-29`), next to
 `monitor` and `audio`.
@@ -445,7 +458,8 @@ bitrate_chain` to `stream::config_t` (`src/stream.h:27-29`), next to
 `server->map(packetTypes[IDX_SET_BITRATE], ...)` in `controlBroadcastThread`:
 
 1. Size check: `payload.size() < 8` gives a log and return.
-2. Convert with `util::endian::little()`.
+2. Convert with `adaptive_bitrate::decode_request()` (byte by byte, section
+   3.2).
 3. `config.input_only`: answer `INPUT_ONLY`.
 4. Encoder not parallel (`!video::encoder_supports_live_resize()`): answer
    `NOT_SUPPORTED`.
@@ -453,8 +467,12 @@ bitrate_chain` to `stream::config_t` (`src/stream.h:27-29`), next to
    client UI allows up to 500000 with `unlockBitrate`.)
 6. `encoder_bitrate()` with the stored chain input.
 7. If `encoder_kbps` equals `session->bitrate.encoder_kbps`, `pending` is
-   empty and `in_flight` is empty: answer `UNCHANGED` with the current values.
-   The state stores these values as the told values (section 5.3).
+   empty and `in_flight` is empty: answer `UNCHANGED` with the values of the
+   request (`requested_kbps`, `accepted_kbps` and `encoder_kbps` of the
+   chain). The state stores these values as the told values (section 5.3).
+   The chain can give one encoder value for two configured values, thus
+   `accepted_kbps` can differ from the running value. The answer must not give
+   `accepted_kbps < requested_kbps` when the host has no cap.
 8. Else store the request in `session->bitrate.pending` (it replaces an
    older pending request) and let the control loop release it (section 5.3).
 
