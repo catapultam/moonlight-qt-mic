@@ -261,8 +261,8 @@ Notes:
   The controller does not have a special case for them. The rules absorb
   them as follows: after `APPLIED_RESTART` and after a live resize,
   `RESTART_SETTLE_MS` (3 s) blocks decisions (rule 1); when it ends, the
-  three 1 s windows of rule 2 no longer contain the frames that the IDR wait
-  dropped. A single IDR wait at another time (for example a decoder
+  three 1 s windows of rule 2 contain the frames that the IDR wait
+  dropped in at most one window, and one lossy window gives no change (rule 4). A single IDR wait at another time (for example a decoder
   error) usually lasts less than one 1 s window, so it gives one lossy
   window at most, and rule 4 makes no change. An IDR wait that follows a
   real network loss adds lost frames to that loss; this makes the loss
