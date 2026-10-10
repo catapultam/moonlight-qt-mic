@@ -18,6 +18,11 @@ typedef struct SDL_FRect
 } SDL_FRect;
 #endif
 
+// SDL_GetTicks64() is not in SDL before 2.0.18. The 32-bit value wraps after 49 days.
+#if !SDL_VERSION_ATLEAST(2, 0, 18)
+#define SDL_GetTicks64() ((Uint64)SDL_GetTicks())
+#endif
+
 #ifndef SDL_HINT_VIDEO_X11_FORCE_EGL
 #define SDL_HINT_VIDEO_X11_FORCE_EGL "SDL_VIDEO_X11_FORCE_EGL"
 #endif
