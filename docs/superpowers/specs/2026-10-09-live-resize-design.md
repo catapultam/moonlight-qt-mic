@@ -445,8 +445,7 @@ streams the display may resize it. Reviewers may decide to gate it behind
   for a newer request. After 60 s it clears `in_progress` also then. A
   late result that comes while no request is in progress is dropped. A
   late result that comes after the next request starts counts as the
-  result of that request: the queues are drained only when a request
-  starts. Thus a late `ENCODER_FAILED` refuses the new request (with the
+  result of that request, because a result has no request id. Thus a late `ENCODER_FAILED` refuses the new request (with the
   new `request_id`) and starts a revert, and a late encoder start sets
   `done_seen` for it. Known limit: this occurs only when `capture_async`
   is stopped for more than 60 s after it read the size.
