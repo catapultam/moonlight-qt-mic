@@ -176,6 +176,36 @@ static void testOldFrameAfterRequest()
     assert(width == 1900 && height == 1060);
 }
 
+// A decoder recreate (device reset) during a pending request: the session sets the
+// expected size on the new decoder again. The new decoder decoded no frame before it saw
+// the request, thus its request frame size is 0x0.
+static void testDecoderRecreate()
+{
+    using LiveResize::FrameSizeClass;
+    using LiveResize::classifyFrameSize;
+    int width, height;
+
+    // The new decoder was created at the old size 1920x1080. A padding encoder sends the
+    // new stream at 2560x1392 for the request 2536x1390: the stream size is the request
+    width = height = -1;
+    assert(classifyFrameSize(2560, 1392, 2536, 1390, 1920, 1080, &width, &height,
+                             0, 0, true) == FrameSizeClass::NewSize);
+    assert(width == 2536 && height == 1390);
+
+    // Without the expected size the stream size would be the padded frame size
+    width = height = -1;
+    assert(classifyFrameSize(2560, 1392, 0, 0, 1920, 1080, &width, &height) == FrameSizeClass::NewSize);
+    assert(width == 2560 && height == 1392);
+
+    // Known limit: the first frame after the recreate is an IDR of the old stream. On a
+    // padding encoder (1920x1088 for 1920x1080) it applies a small shrink request
+    // (1900x1060) before the host changes the size.
+    width = height = -1;
+    assert(classifyFrameSize(1920, 1088, 1900, 1060, 1920, 1080, &width, &height,
+                             0, 0, true) == FrameSizeClass::NewSize);
+    assert(width == 1900 && height == 1060);
+}
+
 int main()
 {
     testRoundDownEven();
@@ -184,6 +214,7 @@ int main()
     testClassifyFrameSize();
     testNewStreamSize();
     testOldFrameAfterRequest();
+    testDecoderRecreate();
     puts("liveresize_test: all checks passed");
     return 0;
 }

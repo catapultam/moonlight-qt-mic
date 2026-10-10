@@ -2522,6 +2522,13 @@ void Session::exec()
                     m_InputHandler->setCaptureActive(true);
                     needsPostDecoderCreationCapture = false;
                 }
+
+                // A new decoder has no expected size. Set it again when a resize
+                // request is pending (device reset or display change), so that the
+                // new decoder finds the requested size.
+                if (m_PendingResize.active) {
+                    m_VideoDecoder->setExpectedFrameSize(m_PendingResize.width, m_PendingResize.height);
+                }
             }
 
             // Request an IDR frame to complete the reset

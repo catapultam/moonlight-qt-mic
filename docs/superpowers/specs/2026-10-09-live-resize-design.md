@@ -1,7 +1,8 @@
 # Live resize: design
 
 Date: 2026-10-09
-Status: draft for review. No code exists yet.
+Status: implemented on the branch `live-resize` in both repositories. Tested
+end to end on 2026-10-09: 3840x2160 to 3070x2024 in about 2 s.
 
 ## 1. Goal
 
@@ -214,6 +215,8 @@ Other state:
   - `vdd_generation`: the value of `proc::vdd_generation` at the request.
   - The tracked stream size (`width`, `height`) and the size before the
     request (`last_width`, `last_height`), `request_id`, `started`.
+  - `timeout_logged`: the watchdog logged once that the request is late
+    (section 4.6). The handler clears it when a request starts.
   The control side sets the size at stream start from `config.monitor`,
   sets it to the requested size when a request starts and sets it back to
   `last_*` on a refusal. It must not read `session->config.monitor` for the
@@ -385,7 +388,7 @@ the new size from the decoded frame (section 5.4).
 | Reason | Check |
 |--------|-------|
 | `BUSY` | `session->resize.in_progress` is set, or a display thread runs (`worker_id != 0`). The control side clears `in_progress` only after `resize_done` or `resize_refused` for the request, or after the watchdog (section 4.6). |
-| `NOT_VIRTUAL_DISPLAY` | `!proc::proc.virtual_display` (`src/process.h:111`) or `vDisplayDriverStatus != OK` (`src/process.cpp:63`). |
+| `NOT_VIRTUAL_DISPLAY` | `!proc::proc.virtual_display` (`src/process.h:111`), `vDisplayDriverStatus != OK` (`src/process.cpp:63`), or `proc::vdd_generation == 0` (no app owns a virtual display now, for example while `terminate` runs). |
 | `MULTIPLE_CLIENTS` | `stream::session::active_sessions > 1` (sessions in state RUNNING). Not `rtsp_stream::session_count()`: it calls `clear(false)`, which stops and joins STOPPING sessions. `join` waits for `controlEnd`, which only the control thread raises, thus a call on the control thread deadlocks. For the same reason the control thread never calls `rtsp_stream::find_session()`. |
 | `SIZE_LIMIT` | Limits in section 4.4. Also when `config.input_only` is set. |
 | `DISPLAY_FAILED` | Step 4 or 5 of section 4.3 failed and the revert ran. |
@@ -410,10 +413,15 @@ streams the display may resize it. Reviewers may decide to gate it behind
   (`src/rtsp.cpp:660`) when it needs to queue a result. If the session is
   gone, the worker only reverts the display and exits.
 - `proc::proc.display_name` and `config::video.output_name` are plain
-  strings read by the capture thread without a lock. `proc_t::execute`
-  already writes them while the capture thread may run. The worker follows
-  the same pattern. The spike in section 8 checks that the capture thread
-  recovers when the name changes.
+  strings with no lock. The capture thread reads `display_name` in
+  `refresh_displays()` and also writes it after `reset_display()` in the
+  reinit loop (`src/video.cpp:1373, 1383`). The worker writes both strings
+  in `change_display_size()` (`src/live_resize.cpp`), and the reinit that
+  the resize causes can run at the same time. `proc_t::execute` already
+  writes them while the capture thread may run. Known limit: this is a data
+  race. The realistic effect is a torn name. Then `refresh_displays()` does
+  not find the display by name and falls back to `output_name` or to index 0,
+  which can be a different display. This wave does not add a lock.
 - Mails are the only channel between the control thread, the worker and
   `capture_async`. The control thread cannot read `resize_pending` or
   `last_good_config`.
@@ -434,8 +442,14 @@ streams the display may resize it. Reviewers may decide to gate it behind
   sets the tracked size to `last_*` and clears `in_progress`. If
   `capture_async` read the size, its result belongs to this request: the
   control thread logs once and waits, so that a late result is not taken
-  for a newer request. After 60 s it clears `in_progress` also then; a
-  later result is dropped and the next request drains the queues.
+  for a newer request. After 60 s it clears `in_progress` also then. A
+  late result that comes while no request is in progress is dropped. A
+  late result that comes after the next request starts counts as the
+  result of that request: the queues are drained only when a request
+  starts. Thus a late `ENCODER_FAILED` refuses the new request (with the
+  new `request_id`) and starts a revert, and a late encoder start sets
+  `done_seen` for it. Known limit: this occurs only when `capture_async`
+  is stopped for more than 60 s after it read the size.
 - After a refusal from the encoder (`resize_refused` with
   `encoder_failed`), the control thread starts `live_resize_revert_worker`
   with a new `worker_id` and the generation of the request. It changes
@@ -462,8 +476,11 @@ streams the display may resize it. Reviewers may decide to gate it behind
   (two when `config::video.isolated_virtual_display_option` is set). The
   mode changes call `ChangeDisplaySettingsExW`, which has no time limit.
   `terminate` sets `proc::vdd_generation` to 0 before it waits for the
-  lock, and `change_display_size()` stops after its current step, thus
-  `terminate` waits for one add (about 1.26 s) or one mode change.
+  lock. `change_display_size()` checks the value after each add and each
+  mode change and then stops. No check follows a remove: each remove comes
+  before an add with no check between them (also on the new GUID path).
+  Thus `terminate` waits for at most one remove and one add (about 1.26 s
+  of name polling), or for one mode change.
 - Risk: `session::join` has a 10 s hang check (`lifetime::debug_trap`).
   When the last session ends, `join` calls `proc.pause()` or
   `proc.running()`, which can call `terminate`. A mode change that does
@@ -500,7 +517,7 @@ flag, the capture display is physical and the host refuses with
 - `app/streaming/input/input.h/.cpp`: add `KeyComboResizeToWindow` with
   `SDLK_w` / `SDL_SCANCODE_W` to `m_SpecialKeyCombos`.
 - `app/streaming/input/keyboard.cpp` `performSpecialKeyCombo()`: call
-  `Session::get()->requestLiveResize()`.
+  `Session::s_ActiveSession->requestLiveResize()`.
 
 ### 5.3 Size computation (`Session::requestLiveResize`)
 
@@ -566,6 +583,13 @@ that the frame has `AV_FRAME_FLAG_KEY` (`key_frame` on older FFmpeg).
    the host changes the size, and a refusal would then be ignored. A frame
    of the request frame size is a frame of the new stream only when it is a
    key frame. The host starts the new stream with an IDR frame.
+
+   Residual limit: on a padding encoder, an old IDR frame (for example
+   after packet loss) can apply a pending request early, when the request
+   is a padded size of the old frame. This is more probable after a decoder
+   recreate during a pending request (section 5.5): the new decoder has no
+   request frame size (`0, 0`), and its first frame is an IDR of the old
+   stream.
 3. Else if the frame size is a padded size of the original size: crop as
    today.
 4. Else: this is a new stream size too, and the new stream size is the frame
@@ -610,10 +634,18 @@ On `SDL_CODE_STREAM_SIZE_CHANGED` in `Session::execInternal`,
    (`session.cpp:2224-2300`) deletes the decoder, flushes window events,
    calls `chooseDecoder` with the new size, and calls `LiRequestIdrFrame()`.
 
-The new decoder does not need `setExpectedFrameSize()`. It is created with
-`w x h`, which is the requested size when the encoder adds padding (section
-5.4, rule 2). Thus its original size is the correct base for the padding
-rule, and it crops the padding.
+The decoder that `applyStreamSize()` causes does not need
+`setExpectedFrameSize()`. It is created with `w x h`, which is the requested
+size when the encoder adds padding (section 5.4, rule 2). Thus its original
+size is the correct base for the padding rule, and it crops the padding.
+
+A recreate for another cause while a request is pending (device reset,
+display or refresh-rate change) makes a decoder that has no expected size.
+Thus the `SDL_RENDER_DEVICE_RESET` handler calls
+`setExpectedFrameSize(m_PendingResize.width, m_PendingResize.height)` on the
+new decoder after `chooseDecoder` when `m_PendingResize.active` is set. The
+new decoder has no request frame size (`0, 0`). See the residual limit in
+section 5.4.
 
 Overlays: `completeInitialization` calls
 `setOverlayRenderer(m_FrontendRenderer)` (`ffmpeg.cpp:727`), so the debug
@@ -767,7 +799,8 @@ app, windowed mode, HDR off, absolute mouse mode on.
    with scale 1. Press `Ctrl+Alt+Shift+W`.
 3. Expect within about 2 seconds: the host log shows the VDD remove and
    create, `Desktop resolution [2536x1390]`, a new encoder at 2536x1390. The
-   client log shows `Recreating renderer` and `Video stream is 2536x1390`.
+   client log shows `Video stream is now 2536x1390` and `Recreating renderer by
+   internal request`.
    The picture fills the window without bars and without blur.
 4. Move the mouse to the four window corners. The host cursor reaches the
    display corners. Click a desktop icon in the bottom right corner.

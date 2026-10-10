@@ -810,9 +810,10 @@ Flickable {
                     }
 
                     ToolTip.delay: 1000
-                    ToolTip.timeout: 5000
+                    ToolTip.timeout: 10000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.")
+                    ToolTip.text: qsTr("Fullscreen generally provides the best performance, but borderless windowed may work better with features like macOS Spaces, Alt+Tab, screenshot tools, on-screen overlays, etc.") + "\n\n" +
+                                  qsTr("You can resize the stream and the host display to the window while streaming using Ctrl+Alt+Shift+W.")
                 }
 
                 Row {
