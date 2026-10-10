@@ -39,7 +39,7 @@ the same in `0affdaa6`, except that `src/stream.cpp` from line 1398 and
 | D3 | The host changes the VDD with remove and re-add of the SudoVDA monitor. The host does not try a plain mode change first: it works only for sizes that are already in the monitor mode list (spike S1b). See section 4.3. | The SudoVDA driver builds the mode list once when the monitor arrives. There is no IOCTL that adds a mode. |
 | D4 | Size rule: round each dimension down to an even number. Keep the current fps and bitrate. Do nothing when the result equals the current stream size. | 4:2:0 encoders and D3D11 NV12 textures need even sizes. Apollo already masks odd sizes (`src/process.cpp:210`). |
 | D5 | The host replies only on refusal, with a reason code. The client shows the reason in the status overlay for 5 seconds. The client also shows a message when no new-size frame arrives in 10 seconds. | A success needs no message: the new frames are the confirmation. A timeout protects against a lost message. |
-| D6 | The client recreates its decoder and renderer when a decoded frame arrives at the requested size. It uses the existing recreate path (`SDL_RENDER_DEVICE_RESET` handling in `Session::execInternal`). | All renderers get a clean start at the new size. No per-renderer resize code. |
+| D6 | The client recreates its decoder and renderer when a decoded frame arrives at the requested size. It uses the existing recreate path (`SDL_RENDER_DEVICE_RESET` handling in `Session::exec`). | All renderers get a clean start at the new size. No per-renderer resize code. |
 | D7 | The host refuses the request when more than one client session is active, when the capture display is not a SudoVDA monitor, when a resize is in progress, or when the size is out of limits. | One VDD serves all sessions. A resize would change the picture for the other clients. |
 | D8 | The hotkey is `Ctrl+Alt+Shift+W`. It works only while a stream is active. | `W` is free in Moonlight, GNOME and PaperWM. Used keys: Q, Z, X, S, M, C, D, V, L, E, K (`app/streaming/input/input.cpp:86-138`). The first choice was `R`, but GNOME uses `Ctrl+Alt+Shift+R` for its screen recorder and takes the key before Moonlight in a windowed stream. |
 | D9 | In windowed and borderless full-screen (`SDL_WINDOW_FULLSCREEN_DESKTOP`) mode the target size is `SDL_GetWindowSizeInPixels()`. In exclusive full-screen (`SDL_WINDOW_FULLSCREEN`) it is the desktop mode of `SDL_GetWindowDisplayIndex()`. | Spike S3 (2026-10-09, GNOME 50, monitors at 100 % and 125 %): windowed and borderless full-screen report the real physical size (3840x2160 on the 4K monitor). Exclusive full-screen reports the emulated mode that Moonlight set (1920x1080), so the desktop mode is necessary there. The window display index was wrong once in S3, so exclusive full-screen with two monitors can pick the wrong monitor. This is an accepted limit. |
@@ -571,33 +571,55 @@ Request state (`LiveResize::ResizeController` in `liveresize.h`, member
   target wins. An automatic target that equals the slot does not change the
   time when it became stable.
 - `takeSend()` drops a target that equals the stream size. It drops an
-  automatic target of a size that the host refused (not BUSY) or that timed
-  out. It sends nothing while a request is in flight.
+  automatic target of a size that is blocked or held (see below). It sends
+  nothing while a request is in flight.
 - Debounce: an automatic target is sent only when it was stable for 500 ms
   (`DebounceMs`). A manual target is sent at once. Time differences are
   signed 32-bit, so a wrap of the tick count is safe.
 - When the request in flight ends (frame of the new size, refusal, or
   timeout), the session calls the pump again. It sends the slot when the
   rules above allow it.
-- BUSY: retry the latest target after 1 s (`BusyRetryMs`). When the slot is
-  empty, the latest target is the refused size. There is no retry limit.
-- Other refusals and the timeout: the size goes into a list of refused sizes
-  (64 entries at most, the oldest goes first). An automatic target of that
-  size is not sent again. A different size can be sent. A manual request
-  is always sent, also for a refused size.
+- BUSY and a send failure (`LiSendResizeRequest` returns an error,
+  `sendFailed()`): retry the latest target. When the slot is empty, the
+  latest target is the failed size. The retry waits 1 s, 2 s, 4 s, then 8 s
+  for each next failure of the same target (back-off). After 30 s of
+  failures for the same target the client stops and holds that size. A
+  different target starts the back-off again. A stream size change resets
+  it.
+- A manual request that gets BUSY or a send failure: when the automatic
+  mode is off (`autoMode`), it is not retried. When the automatic mode is
+  on, it is retried as an automatic request.
+- Other refusals: the size goes into a list of refused sizes (64 entries at
+  most, the oldest goes first). Each entry expires after 60 s. A stream size
+  change clears the list. While the entry is in the list, an automatic
+  target of that size is not sent. A different size can be sent. A target
+  of the refused size that waits in the slot (also a manual one) is
+  dropped, so the same size is not sent two times.
+- Timeout: one automatic retry of the same size after 10 s (when the
+  automatic mode is on, or the request was automatic). A second timeout of
+  that size holds it. A newer target of another size in the slot does not
+  wait.
+- A held size is not sent automatically until the target changes to a
+  different size, or the stream size changes.
+- A manual request is always sent, also for a refused or held size.
 - `wakeDelayMs(now)` gives the time until the slot can be sent, or -1 when
   nothing waits. The pump starts a one-shot `SDL_AddTimer` with this delay.
   The timer pushes `SDL_CODE_RESIZE_PUMP` (110) with a generation number;
   an event from an older timer is ignored. The cleanup at the end of
-  `execInternal` removes the timer and calls `m_ResizeState.reset()`.
+  `Session::exec` removes the timer and calls `m_ResizeState.reset()`.
 - After `applyStreamSize()`, the session sends no request until the new
   decoder sends event 111 (`m_ResizeWaitingForFrame`). Thus the new decoder
   has decoded a frame before it sees the next request, and its request frame
   size is correct (section 5.4).
 
 All calls of `LiSendResizeRequest` are in the pump, on the SDL main thread,
-in the event loop of `execInternal`. This is between `LiStartConnection`
+in the event loop of `Session::exec`. This is between `LiStartConnection`
 and `LiStopConnection`. `LiIsLiveResizeSupported` is read only there.
+
+Known limit: when the host changes the stream size on its own (for example a
+game sets a display mode), the automatic mode asks for the window size
+again. The client and the host application can then change the size back
+and forth.
 
 Note on full screen: `app/main.cpp:753` sets
 `SDL_VIDEO_WAYLAND_MODE_SCALING=aspect`, and
@@ -684,7 +706,7 @@ New `SDL_USEREVENT` codes next to `session.cpp:26-31`:
 `SDL_CODE_FIRST_FRAME_DECODED` (111) are in `decoder.h` (sections 5.4 and
 5.2).
 
-On `SDL_CODE_STREAM_SIZE_CHANGED` in `Session::execInternal`,
+On `SDL_CODE_STREAM_SIZE_CHANGED` in `Session::exec`,
 `Session::applyStreamSize(w, h)` does these steps:
 
 1. Call `m_ResizeState.ended()`, stop the timer, and set the expected size
@@ -754,12 +776,13 @@ again when the window size changed. In automatic mode the
   `ReasonTimeout`).
 - A refusal or timeout for another `request_id` is ignored.
 - `ResizeController::refused()` and `timedOut()` return `show`:
-  - Manual request: always true. A manual BUSY shows the text and is
-    retried after 1 s.
+  - Manual request: always true. A manual BUSY shows the text one time. It
+    is retried (as an automatic request, with no more text) only when the
+    automatic mode is on.
   - Automatic request, BUSY: false (the client retries).
   - Automatic request, other reasons and the timeout: true only the first
-    time for this (reason, size). Thus a drag does not show the same text
-    again and again. Reasons that do not depend on the size
+    time for this (reason, size) in 60 s. Thus a drag does not show the
+    same text again and again. Reasons that do not depend on the size
     (MULTIPLE_CLIENTS, NOT_VIRTUAL_DISPLAY) show one time for each new size.
   - When `show` is false, the session writes the text to the log only.
 - NOT_SUPPORTED (no SDP attribute): the automatic mode writes one log line
@@ -881,10 +904,18 @@ pointer in `moonlight-qt-mic`.
   debounce and a tick wrap; a target equal to the stream size does nothing;
   a fast sequence of targets during a request gives exactly one follow-up
   send of the last size; duplicate targets do nothing; BUSY retries after
-  1 s; other refusals and the timeout are not retried for the same size and
-  are shown one time per (reason, size); a refusal for an old `request_id`
-  is ignored; a manual request shares the slot, is sent at once, and its
-  refusal is always shown; `reset()`.
+  1 s with the back-off 1, 2, 4, 8 s and the stop after 30 s
+  (`testControllerBusyBackoff`); a manual BUSY is not retried with the
+  automatic mode off and is retried as automatic with it on
+  (`testControllerManualBusyAuto`); other refusals are not retried for the
+  same size for 60 s, the list is cleared on a stream size change
+  (`testControllerRefusalExpiry`), and they are shown one time per
+  (reason, size); a timeout gets one retry after 10 s, then the size is held
+  until the target changes (`testControllerTimeout`); a send failure keeps
+  the target (`testControllerSendFailed`); a refusal drops a slot target of
+  the same size (`testControllerRefusalDropsSlot`); a refusal for an old
+  `request_id` is ignored; a manual request shares the slot, is sent at
+  once, and its refusal is always shown; `reset()`.
 - common-c: build with `-DUSE_MBEDTLS` off in the toolbox and check that
   `LiSendResizeRequest` returns an error when no connection exists.
 
@@ -933,7 +964,8 @@ app, windowed mode, HDR off, absolute mouse mode on.
     and off. Expect one request for each new size.
 16. Automatic mode, refusal: connect a second client and drag the window.
     Expect "Another client is connected" one time for each new size, not
-    for each size event. Expect no repeated request for the same size.
+    for each size event. Expect no repeated request for the same size in
+    60 s.
 17. Automatic mode, stock host: expect one log line and no overlay.
 18. Automatic mode with the hotkey: press `Ctrl+Alt+Shift+W` during a
     request. Expect the window size to be sent after the request ends.
