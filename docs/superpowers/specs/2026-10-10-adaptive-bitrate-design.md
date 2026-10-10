@@ -824,6 +824,11 @@ the current target.
   the selected bitrate."
 - Command line: `parser.addToggleOption("adaptive-bitrate", "network
   adaptive bitrate")` next to `bitrate` (`cli/commandlineparser.cpp:351`).
+  `--bitrate <kbps>` also sets `autoAdjustBitrate = false`: the value is a
+  manual ceiling (D11). A display or fps option without `--bitrate` sets the
+  default bitrate for the stream size and `autoAdjustBitrate = true`. The
+  command line stream path does not save these values.
+- The line numbers in this section are from before the change.
 
 ### 6.5 Stats overlay
 

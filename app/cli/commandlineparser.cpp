@@ -424,6 +424,9 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     } else if (displaySet || parser.isSet("fps")) {
         preferences->bitrateKbps = preferences->getDefaultBitrate(
             preferences->width, preferences->height, preferences->fps, preferences->enableYUV444);
+        // The bitrate is the default for the stream size again, so it must follow
+        // a live resize (spec D10), also when the saved bitrate was manual
+        preferences->autoAdjustBitrate = true;
     }
 
     // Resolve --packet-size option
