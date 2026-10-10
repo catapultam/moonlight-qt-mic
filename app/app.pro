@@ -231,6 +231,7 @@ HEADERS += \
     streaming/input/input.h \
     streaming/session.h \
     streaming/liveresize.h \
+    streaming/adaptivebitrate.h \
     streaming/audio/capture/microphonecapture.h \
     streaming/audio/renderers/renderer.h \
     streaming/audio/renderers/sdl.h \
