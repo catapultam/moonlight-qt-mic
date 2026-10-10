@@ -335,8 +335,9 @@ the Slow and Fast values.
 | `APP_LIMITED_PCT` | 40 | Increase (rule 5), and decrease on delay or FEC pressure (rule 3), only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %: in the end-to-end test a static desktop measured 0.1-1.3 Mbps with `encoder_kbps` at 30-50 Mbps (below 3 %). The end-to-end test with full motion measured only 63-75 % of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
 | `APP_LIMITED_HOLD_MS` | 5000 | Rule 3: for this time after a bad period starts, the app-limited test uses the larger of the measured bitrate and the measured bitrate of the last clean tick. A settle time removes the stored value (4.3). |
 | `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
-| `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000 (speed), 3000 | Between two decreases (in place, restart mode) |
-| `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000 (speed), 15000 | Between two increases (in place, restart mode) |
+| `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
+| `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
+| `RESTART_INC_STEP_MAX_PCT` | 16 | Restart mode doubles the increase step up to this value |
 | `REQUEST_TIMEOUT_MS` | 3000 | Pending request timeout |
 | `LOSS_MIN_FRAMES` | 10 | A 1 s window with fewer frames gives no loss signal |
 | `LOSS_MIN_TICKS` | 3 (speed) | Sustained loss also needs this many ticks with loss in the 3 s history |
@@ -386,8 +387,8 @@ Rules, in order, at each tick:
    return `send = true`.
 
 Restart mode: after the first `APPLIED_RESTART` or `ENCODER_FAILED`, the
-controller uses the restart intervals and doubles the increase steps for the
-rest of the session (the host also keeps restart mode on, section 5.3). Thus
+controller uses the restart intervals and doubles the increase steps (up to
+`RESTART_INC_STEP_MAX_PCT`, 16 %) for the rest of the session (the host also keeps restart mode on, section 5.3). Thus
 there are fewer IDR frames.
 
 App-limited guard (rule 5): with CBR and filler data off
@@ -925,6 +926,7 @@ the current target.
 - Speed setting (section 11): `StreamingPreferences` enum
   `AdaptiveBitrateSpeed` (`ABS_SLOW`, `ABS_NORMAL`, `ABS_FAST`), property
   `adaptiveBitrateSpeed`, key `adaptivebitratespeed`, default `ABS_NORMAL`.
+  A saved value that is not known becomes `ABS_NORMAL`.
   `SettingsView.qml`: a label "Bitrate adaptation speed" and a combo box
   (Slow, Normal, Fast) under the "Adapt bitrate to the network" check box.
   The combo box is enabled only when the check box is checked; it keeps its
@@ -1174,9 +1176,11 @@ Later changes from the end-to-end test (Task 11):
 
 Later change: the speed setting (section 11).
 
-- A new setting (Slow, Normal, Fast) changes the increase steps, the
-  increase interval, the clean time, the window counts for a cut, the FEC
-  level and the decrease interval. Normal keeps the values of this spec.
+- A new setting (Slow, Normal, Fast) changes the increase steps, the clean
+  time, the window counts for a cut and the FEC level. Normal keeps the
+  values of this spec.
+- Restart mode doubles the increase step up to 16 %
+  (`RESTART_INC_STEP_MAX_PCT`). Normal is not changed (8 % x 2 = 16 %).
 - `Controller::start()` has a fourth argument, the speed.
 - New constants `LOSS_WINDOWS` and `DELAY_WINDOWS` (2) replace the fixed
   counts of rules 2 and 3.
@@ -1195,13 +1199,28 @@ limit of the network. Normal is the behavior of section 4.3.
 |-------|------|--------|------|
 | Increase step (`INC_STEP_PCT`) | 4 % | 8 % | 15 % |
 | Increase step near the last failure (`INC_STEP_NEAR_PCT`) | 3 % | 3 % | 5 % |
-| Time between increases (`MIN_INC_INTERVAL_MS`) | 8 s | 4 s | 2 s |
+| Restart mode step, normal / near (x 2, up to 16 %) | 8 % / 6 % | 16 % / 6 % | 16 % / 10 % |
 | Clean time before an increase (`STABLE_MS`) | 8 s | 4 s | 2 s |
 | Lossy windows for a loss cut (`LOSS_WINDOWS`) | 3 | 2 | 2 |
 | Ticks with loss for a loss cut (`LOSS_MIN_TICKS`) | 3 | 3 | 2 |
 | Delay windows for a delay cut (`DELAY_WINDOWS`) | 3 | 2 | 2 |
 | FEC recovered level for a cut (`FEC_RECOVERED_PCT`) | 5 % | 3 % | 3 % |
-| Time between decreases (`MIN_DEC_INTERVAL_MS`) | 2 s | 1 s | 1 s |
+
+Pace of the changes:
+
+- Increases: after a change, the settle time (`CHANGE_SETTLE_MS`, 1 s)
+  clears the windows. Then the clean time (`STABLE_MS` of the speed: 8, 4
+  or 2 s) must pass. Thus an increase comes about 8.75 s (Slow), 4.75 s
+  (Normal) or 2.75 s (Fast) after the answer to the last change.
+  `MIN_INC_INTERVAL_MS` (4 s) is the same on each speed. It has an effect
+  only on Fast: between two increases, settle time + clean time is 3 s, so
+  the 4 s interval sets the time. The first increase after a cut comes after
+  2.75 s.
+- Decreases: after a cut, the settle time clears the windows. A new cut
+  needs full windows again (2 windows, or 3 on Slow). Thus a new cut comes
+  about 2.75 s (Normal, Fast) or 3.75 s (Slow) after the answer.
+  `MIN_DEC_INTERVAL_MS` (1 s) is shorter than this, so it has no effect on
+  any speed. The speed does not change it.
 
 The setting does not change:
 
@@ -1210,10 +1229,13 @@ The setting does not change:
   on each speed (rule 2).
 - The floor, the ceiling, the app-limited guard and its hold.
 - The settle times and the timeouts.
-- The restart mode intervals (`MIN_DEC_INTERVAL_RESTART_MS`,
-  `MIN_INC_INTERVAL_RESTART_MS`). They are independent constants, so they
-  stay the same on each speed. Restart mode doubles the increase step of the
-  speed, so the step stays in proportion.
+- The intervals between changes (`MIN_DEC_INTERVAL_MS`,
+  `MIN_INC_INTERVAL_MS`) and the restart mode intervals
+  (`MIN_DEC_INTERVAL_RESTART_MS`, `MIN_INC_INTERVAL_RESTART_MS`). They are
+  independent constants, so they stay the same on each speed. Restart mode
+  doubles the increase step of the speed up to 16 %
+  (`RESTART_INC_STEP_MAX_PCT`): Fast 15 % becomes 16 %, its near step 5 %
+  becomes 10 %.
 
 History: the history holds 12 deltas (3 windows of 1 s). Slow needs 3
 windows, so the history does not change.
@@ -1221,4 +1243,12 @@ windows, so the history does not change.
 Near step: the near step is not below `DEAD_BAND_PCT` (3 %) on any speed.
 A smaller step does not pass the dead band (rule 6), so the target would not
 climb near the last failure rate until the failure memory ends. Slow uses
-3 %, the same as Normal; it is slower by its 4 % step and its 8 s interval.
+3 %, the same as Normal; it is slower by its 4 % step and its 8 s clean time.
+
+Loss ticks on Slow: `LOSS_MIN_TICKS` (3) adds nothing on Slow. Each lossy
+window has at least one tick with loss, so 3 lossy windows always have 3
+ticks with loss.
+
+Known limit of Fast: near the network capacity, Fast cycles a cut and a
+climb about every 15 s. The larger steps and the short clean time take the
+target back above the capacity sooner, and the loss rule cuts it again.

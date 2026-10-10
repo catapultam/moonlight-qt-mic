@@ -956,25 +956,25 @@ static void testSpeedTuning()
 {
     const Tuning slow = tuningFor(Speed::Slow);
     assert(slow.incStepPct == 4 && slow.incStepNearPct == 3);
-    assert(slow.incIntervalMs == 8000 && slow.stableMs == 8000);
+    assert(slow.stableMs == 8000);
     assert(slow.lossWindows == 3 && slow.lossMinTicks == 3 && slow.delayWindows == 3);
-    assert(slow.fecRecoveredPct == 5 && slow.decIntervalMs == 2000);
+    assert(slow.fecRecoveredPct == 5);
 
     const Tuning normal = tuningFor(Speed::Normal);
     assert(normal.incStepPct == INC_STEP_PCT && normal.incStepNearPct == INC_STEP_NEAR_PCT);
-    assert(normal.incIntervalMs == MIN_INC_INTERVAL_MS && normal.stableMs == STABLE_MS);
+    assert(normal.stableMs == STABLE_MS);
     assert(normal.lossWindows == LOSS_WINDOWS && normal.lossMinTicks == LOSS_MIN_TICKS);
     assert(normal.delayWindows == DELAY_WINDOWS);
-    assert(normal.fecRecoveredPct == FEC_RECOVERED_PCT && normal.decIntervalMs == MIN_DEC_INTERVAL_MS);
+    assert(normal.fecRecoveredPct == FEC_RECOVERED_PCT);
     assert(INC_STEP_PCT == 8 && INC_STEP_NEAR_PCT == 3 && MIN_INC_INTERVAL_MS == 4000 && STABLE_MS == 4000);
     assert(LOSS_WINDOWS == 2 && LOSS_MIN_TICKS == 3 && DELAY_WINDOWS == 2);
     assert(FEC_RECOVERED_PCT == 3 && MIN_DEC_INTERVAL_MS == 1000);
 
     const Tuning fast = tuningFor(Speed::Fast);
     assert(fast.incStepPct == 15 && fast.incStepNearPct == 5);
-    assert(fast.incIntervalMs == 2000 && fast.stableMs == 2000);
+    assert(fast.stableMs == 2000);
     assert(fast.lossWindows == 2 && fast.lossMinTicks == 2 && fast.delayWindows == 2);
-    assert(fast.fecRecoveredPct == 3 && fast.decIntervalMs == 1000);
+    assert(fast.fecRecoveredPct == 3);
 
     Sim sim(40000, true, Speed::Fast);
     assert(sim.c.tuning().incStepPct == 15);
@@ -997,12 +997,12 @@ static void testSlowLossWindows()
     assert(sim.stepUntilSend(d, 20, 1) == 4);  // the third lossy window
     assert(d.reason == Reason::Loss && d.targetKbps == 30000);
 
-    // The minimum time between cuts is 2 s
+    // The next cut: the settle time, then 3 full lossy windows
     uint64_t firstMs = sim.s.nowMs;
     sim.sendAndAnswer(d);
     assert(sim.stepUntilSend(d, 40, 1) > 0);
     assert(d.reason == Reason::Loss);
-    assert(sim.s.nowMs - firstMs >= 2000);
+    assert(sim.s.nowMs - firstMs == CHANGE_SETTLE_MS + 3 * WINDOW_TICKS * TICK_MS - TICK_MS);
 }
 
 // Spec 11: Fast cuts with 2 lossy ticks; Normal needs 3
@@ -1084,13 +1084,14 @@ static void testSpeedIncrease()
         uint64_t decreaseMs = sim.s.nowMs;
         assert(sim.stepUntilSend(d, 60) > 0);
         assert(d.reason == Reason::Increase && d.targetKbps == 34500);  // 15 %
-        assert(sim.s.nowMs - decreaseMs >= CHANGE_SETTLE_MS + 2000 - TICK_MS);
-        assert(sim.s.nowMs - decreaseMs < CHANGE_SETTLE_MS + STABLE_MS);
+        // The settle time, then the clean time (2 s)
+        assert(sim.s.nowMs - decreaseMs == CHANGE_SETTLE_MS + 2000 - TICK_MS);
         sim.sendAndAnswer(d);
         uint64_t increaseMs = sim.s.nowMs;
         assert(sim.stepUntilSend(d, 60) > 0);
         assert(d.reason == Reason::Increase && d.targetKbps == 36225);  // near the failure rate: 5 %
-        assert(sim.s.nowMs - increaseMs >= 2000);
+        // Settle time + clean time is 3 s, so MIN_INC_INTERVAL_MS (4 s) sets this time
+        assert(sim.s.nowMs - increaseMs == MIN_INC_INTERVAL_MS);
     }
     {
         Sim sim(40000, true, Speed::Slow);
@@ -1101,17 +1102,18 @@ static void testSpeedIncrease()
         uint64_t decreaseMs = sim.s.nowMs;
         assert(sim.stepUntilSend(d, 80) > 0);
         assert(d.reason == Reason::Increase && d.targetKbps == 31200);  // 4 %
-        assert(sim.s.nowMs - decreaseMs >= CHANGE_SETTLE_MS + 8000 - TICK_MS);
+        // The settle time, then the clean time (8 s)
+        assert(sim.s.nowMs - decreaseMs == CHANGE_SETTLE_MS + 8000 - TICK_MS);
         sim.sendAndAnswer(d);
         uint64_t increaseMs = sim.s.nowMs;
         assert(sim.stepUntilSend(d, 80) > 0);
         assert(d.reason == Reason::Increase && d.targetKbps == 32448);  // 4 %
-        assert(sim.s.nowMs - increaseMs >= 8000);
+        assert(sim.s.nowMs - increaseMs == CHANGE_SETTLE_MS + 8000 - TICK_MS);
     }
 }
 
 // Spec 11: on Slow, the target keeps climbing near the last failure rate:
-// 3 % steps (equal to the dead band), 8 s apart
+// 3 % steps (equal to the dead band), one each settle time + clean time
 static void testSlowNearFailureClimb()
 {
     Sim sim(40000, true, Speed::Slow);
@@ -1128,14 +1130,32 @@ static void testSlowNearFailureClimb()
     uint64_t lastMs = sim.s.nowMs;
     assert(sim.stepUntilSend(d, 80) > 0 && d.reason == Reason::Increase);
     assert(d.targetKbps == 36146);  // 3 %
-    assert(sim.s.nowMs - lastMs >= 8000);
+    assert(sim.s.nowMs - lastMs == CHANGE_SETTLE_MS + 8000 - TICK_MS);
     assert(sim.s.nowMs - failureMs < FAILURE_MEMORY_MS);
     sim.sendAndAnswer(d);
     lastMs = sim.s.nowMs;
     assert(sim.stepUntilSend(d, 80) > 0 && d.reason == Reason::Increase);
     assert(d.targetKbps == 37230);  // 3 %
-    assert(sim.s.nowMs - lastMs >= 8000);
+    assert(sim.s.nowMs - lastMs == CHANGE_SETTLE_MS + 8000 - TICK_MS);
     assert(sim.s.nowMs - failureMs < FAILURE_MEMORY_MS);
+}
+
+// Spec 11: restart mode doubles the increase step up to RESTART_INC_STEP_MAX_PCT
+static void testFastRestartMode()
+{
+    Sim sim(40000, true, Speed::Fast);
+    sim.runStart();
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 1) > 0 && d.targetKbps == 30000);
+    sim.sendAndAnswer(d, StatusAppliedRestart);
+    assert(sim.c.restartMode());
+    assert(sim.stepUntilSend(d, 80) > 0);
+    assert(d.reason == Reason::Increase && d.targetKbps == 34800);  // 16 %, not 30 %
+    uint64_t firstIncreaseMs = sim.s.nowMs;
+    sim.sendAndAnswer(d, StatusAppliedRestart);
+    assert(sim.stepUntilSend(d, 120) > 0);
+    assert(d.reason == Reason::Increase && d.targetKbps == 38280);  // near the failure rate: 10 %
+    assert(sim.s.nowMs - firstIncreaseMs >= MIN_INC_INTERVAL_RESTART_MS);
 }
 
 int main()
@@ -1193,6 +1213,7 @@ int main()
     testSlowHeavyLoss();
     testSpeedIncrease();
     testSlowNearFailureClimb();
+    testFastRestartMode();
     puts("adaptivebitrate_test: all checks passed");
     return 0;
 }

@@ -79,6 +79,7 @@ constexpr uint32_t MIN_DEC_INTERVAL_MS = 1000;
 constexpr uint32_t MIN_DEC_INTERVAL_RESTART_MS = 3000;
 constexpr uint32_t MIN_INC_INTERVAL_MS = 4000;
 constexpr uint32_t MIN_INC_INTERVAL_RESTART_MS = 15000;
+constexpr uint32_t RESTART_INC_STEP_MAX_PCT = 16;  // restart mode doubles the increase step up to this value
 constexpr uint32_t REQUEST_TIMEOUT_MS = 3000;
 constexpr uint32_t START_ATTEMPTS = 3;             // plan: start requests without an answer before the stop
 constexpr uint32_t ENCODER_FAILED_MAX_WAIT_MS = 60000; // the wait after ENCODER_FAILED doubles up to this value
@@ -89,10 +90,10 @@ constexpr size_t FEC_TICKS = 8;                    // a 2 s window
 constexpr size_t RTT_BUCKETS = RTT_BASELINE_MS / 1000;
 
 // The adaptation speed setting (spec section 11). Slow reacts less to short network
-// changes; Fast gets back to the full bitrate sooner after a dip. Normal uses the
+// changes; Fast gets back to the full bitrate sooner after a drop. Normal uses the
 // constants above. The setting does not change the cut sizes, the heavy loss rule,
-// the floor, the ceiling, the app-limited guard, the settle times, the restart mode
-// intervals and the timeouts.
+// the floor, the ceiling, the app-limited guard, the settle times, the intervals
+// between changes (also in restart mode) and the timeouts.
 enum class Speed {
     Slow,
     Normal,
@@ -112,13 +113,11 @@ inline const char* speedName(Speed speed)
 struct Tuning {
     uint32_t incStepPct;       // INC_STEP_PCT
     uint32_t incStepNearPct;   // INC_STEP_NEAR_PCT
-    uint32_t incIntervalMs;    // MIN_INC_INTERVAL_MS
     uint32_t stableMs;         // STABLE_MS
     uint32_t lossWindows;      // LOSS_WINDOWS
     uint32_t lossMinTicks;     // LOSS_MIN_TICKS
     uint32_t delayWindows;     // DELAY_WINDOWS
     uint32_t fecRecoveredPct;  // FEC_RECOVERED_PCT
-    uint32_t decIntervalMs;    // MIN_DEC_INTERVAL_MS
 };
 
 constexpr Tuning tuningFor(Speed speed)
@@ -126,12 +125,12 @@ constexpr Tuning tuningFor(Speed speed)
     switch (speed) {
     case Speed::Slow:
         // The near step is not below DEAD_BAND_PCT: a smaller step does not pass the dead band
-        return Tuning{4, INC_STEP_NEAR_PCT, 8000, 8000, 3, LOSS_MIN_TICKS, 3, 5, 2000};
+        return Tuning{4, INC_STEP_NEAR_PCT, 8000, 3, LOSS_MIN_TICKS, 3, 5};
     case Speed::Fast:
-        return Tuning{15, 5, 2000, 2000, LOSS_WINDOWS, 2, DELAY_WINDOWS, FEC_RECOVERED_PCT, MIN_DEC_INTERVAL_MS};
+        return Tuning{15, 5, 2000, LOSS_WINDOWS, 2, DELAY_WINDOWS, FEC_RECOVERED_PCT};
     default:
-        return Tuning{INC_STEP_PCT, INC_STEP_NEAR_PCT, MIN_INC_INTERVAL_MS, STABLE_MS, LOSS_WINDOWS,
-                      LOSS_MIN_TICKS, DELAY_WINDOWS, FEC_RECOVERED_PCT, MIN_DEC_INTERVAL_MS};
+        return Tuning{INC_STEP_PCT, INC_STEP_NEAR_PCT, STABLE_MS, LOSS_WINDOWS, LOSS_MIN_TICKS, DELAY_WINDOWS,
+                      FEC_RECOVERED_PCT};
     }
 }
 
@@ -471,7 +470,7 @@ public:
                         (uint64_t)m_Target * 100 >= (uint64_t)NEAR_FAILURE_PCT * m_LastFailureKbps;
                 uint32_t pct = nearFailure ? m_Tuning.incStepNearPct : m_Tuning.incStepPct;
                 if (m_RestartMode) {
-                    pct *= 2;
+                    pct = pct * 2 < RESTART_INC_STEP_MAX_PCT ? pct * 2 : RESTART_INC_STEP_MAX_PCT;
                 }
                 uint32_t step = (uint32_t)((uint64_t)m_Target * pct / 100);
                 if (step < DEAD_BAND_MIN_KBPS) {
@@ -487,13 +486,13 @@ public:
             return d;
         }
         if (newKbps < m_Target) {
-            const uint32_t interval = m_RestartMode ? MIN_DEC_INTERVAL_RESTART_MS : m_Tuning.decIntervalMs;
+            const uint32_t interval = m_RestartMode ? MIN_DEC_INTERVAL_RESTART_MS : MIN_DEC_INTERVAL_MS;
             if (m_HaveDecrease && now - m_LastDecreaseMs < interval) {
                 return d;
             }
         }
         else {
-            const uint32_t interval = m_RestartMode ? MIN_INC_INTERVAL_RESTART_MS : m_Tuning.incIntervalMs;
+            const uint32_t interval = m_RestartMode ? MIN_INC_INTERVAL_RESTART_MS : MIN_INC_INTERVAL_MS;
             if (m_HaveIncrease && now - m_LastIncreaseMs < interval) {
                 return d;
             }
