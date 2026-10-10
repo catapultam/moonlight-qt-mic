@@ -15,13 +15,19 @@ We control both ends:
 
 - Client: `~/GitHub/moonlight-qt-mic` (moonlight-qt fork) with the
   `moonlight-common-c` submodule (`Catapultam-GMG/moonlight-common-c-mic`).
-- Host: `logabell/apollo-microphone` at commit `0affdaa6`, installed on
-  CPLT-4A as release `v2026.3.18-mic.1`. Windows, SudoVDA driver 1.10.9.289,
+- Host: `logabell/apollo-microphone` at commit `99794062` (tag
+  `v2026.3.18-mic.1`, `upstream/master`), installed on CPLT-4A as release
+  `v2026.3.18-mic.1`. The spike used `0affdaa6` (tag `v2026.3.17-mic.1`).
+  On 2026-10-09 the branch `live-resize` merged `99794062` (merge commit
+  `99b4b76f`), because `0affdaa6` has only the VB-CABLE microphone backend
+  and `99794062` has the Steam Streaming Microphone backend. Windows, SudoVDA driver 1.10.9.289,
   `headless_mode = enabled`, `capture = ddx`.
 
 Research clones (read-only) are in `/tmp/live-resize/apollo-microphone`
 (checked out at `0affdaa6`) and `/tmp/live-resize/SudoVDA` (driver source,
-`a4b09fa`). All host file references below are relative to that clone.
+`a4b09fa`). All host file references below are for `99794062`. They are
+the same in `0affdaa6`, except that `src/stream.cpp` from line 1398 and
+`src/rtsp.cpp` after line 1176 are one line lower in `99794062`.
 
 ## 2. Decisions
 
@@ -126,11 +132,11 @@ The existing feature-flag bit space (`SS_FF_*` in `Limelight-internal.h`,
 `platform_caps` in `src/platform/common.h:278-284`) is left alone, because
 upstream Sunshine owns it.
 
-## 4. Host changes (Apollo at 0affdaa6)
+## 4. Host changes (Apollo at 99794062, v2026.3.18-mic.1)
 
 ### 4.1 How video runs today
 
-- `videoThread` (`src/stream.cpp:2032`) calls `video::capture(session->mail,
+- `videoThread` (`src/stream.cpp:2033`) calls `video::capture(session->mail,
   session->config.monitor, session)` with a copy of `config_t`.
 - `capture()` (`src/video.cpp:2472`) takes `config_t config` by value. It
   calls `capture_async()` (`src/video.cpp:2354`) when
@@ -191,7 +197,7 @@ Mail rules (`src/thread_safe.h`):
   exists. A raise on a mail with no holder is lost: the temporary handle
   drops, and the next `event<T>()` makes a new empty event. So the control
   side keeps a persistent handle on `resize_done` and `resize_refused` for
-  the session life, as `hdr_queue` does (`src/stream.cpp:2349`).
+  the session life, as `hdr_queue` does (`src/stream.cpp:2324`).
 
 Other state:
 
@@ -399,7 +405,7 @@ streams the display may resize it. Reviewers may decide to gate it behind
   The VDD work takes up to seconds, so it runs in a detached worker thread,
   as `IDX_EXEC_SERVER_CMD` does (`src/stream.cpp:1029-1046`).
 - The worker must not keep the raw `session_t*`. It stores the session uuid
-  (`stream::session::uuid(session)`, `src/stream.cpp:2086`) and gets a
+  (`stream::session::uuid(session)`, `src/stream.cpp:2087`) and gets a
   `shared_ptr` back with `rtsp_stream::find_session(uuid)`
   (`src/rtsp.cpp:660`) when it needs to queue a result. If the session is
   gone, the worker only reverts the display and exits.
@@ -677,7 +683,9 @@ Facts:
 Plan:
 
 1. Fork `logabell/apollo-microphone` to `Catapultam-GMG/apollo-microphone`.
-   Branch `live-resize` from `0affdaa6`.
+   Branch `live-resize` from `0affdaa6`. Later, merge `99794062`
+   (`v2026.3.18-mic.1`) into `live-resize` for the Steam Streaming
+   Microphone backend (done 2026-10-09, merge commit `99b4b76f`).
 2. Restore `.github/workflows/ci-windows.yml` from `da5a4e3e^` as a
    standalone workflow with `on: workflow_dispatch` and `push` on the
    branch. Keep: checkout with submodules, MSYS2 ucrt64 setup, the
@@ -791,7 +799,7 @@ implementation.
 | R1 | Remove and re-add of the SudoVDA monitor with the same GUID and a new preferred mode does not give the odd size, or Windows keeps the old mode. | Spike S1 (2026-10-09, CPLT-4A, SudoVDA 1.10.9.289, not elevated, script `%TEMP%\sudovda-s1\s1.ps1`): ADD of a new GUID at 2536x1390@60000 gave that current mode in 97 ms; the mode list (57 entries) contains the requested size, also odd sizes (2537x1391 accepted). REMOVE + ADD of the SAME GUID at a new size took about 120 ms and kept the GDI name, but Windows applied the mode it saved for that monitor identity (2536x1390), not the new size, for at least 6 s. DPI and the other monitor did not change. The watchdog timeout is 3 s. Decision: after each re-add the host calls `changeDisplaySettings(name, w, h, fps)` (as the launch path does). If the current mode is still wrong after that, the host re-adds with a new GUID and updates `display_guid`. S1b (2026-10-09 14:33, run by the Armor-Console session): after a re-add of the same GUID the saved mode is active; `ChangeDisplaySettingsExW(name, w, h, 60, CDS_UPDATEREGISTRY)` then returns 0 and applies 1922x1078 in 286 ms and the odd size 2537x1391 in 124 ms. A mode change WITHOUT a re-add to a size that is not in the current list returns -2 (`DISP_CHANGE_BADMODE`); the list is rebuilt at each ADD and holds the size of that ADD. A new GUID and serial at 2000x1124 is active at that size 136 ms after ADD, with no mode change. Apollo's display did not change at any time. Odd sizes therefore work end to end in the driver; D4 (round down to even) stays, for the encoders. |
 | R2 | The capture thread does not find the re-added display because the device name changed, and `refresh_displays` falls back to a physical display. | Spike S1 also runs during a stream. Check that `Desktop resolution [...]` in the log shows the new VDD. If the fallback picks another display, the worker must set `proc::proc.display_name` before the capture thread reinitializes, or the capture thread must wait for the worker (a `mail::resize_display_ready` event). |
 | R3 | Windows resets the display scale for the re-added monitor, so the host desktop looks different after each resize. | Measured in S1. If it happens, keep it as a known effect (U1), or test adding the new monitor before removing the old one (new GUID, update `display_guid`); that keeps a display attached but also changes the identity. |
-| R4 | The 2025-07 `ci-windows.yml` cannot build the 2026-03 tree. | Resolved by spike S2 (2026-10-09): fork `catapultam/apollo-microphone`, branch `live-resize` = `0affdaa6` + 4 commits: a build-only `.github/workflows/build-windows.yml` (runner's MSYS2 at `C:\msys64` with `release: false`, because `cmake/targets/common.cmake` finds `npm-cli.js` only there), the `moonlight-common-c` submodule URL set to `logabell/moonlight-common-c` (pinned `6a276a66` is on no branch; GitHub serves it by hash), and `#define DATA_SHARDS_MAX 255` in `src/stream.cpp` (the upstream-based mic `moonlight-common-c` does not include an `rs.h` that defines it; the installed host build was a local dirty build with the same gap). Run `37974002618` passed and produced `Apollo.exe` (NSIS installer) and `Apollo.zip`. |
+| R4 | The 2025-07 `ci-windows.yml` cannot build the 2026-03 tree. | Resolved by spike S2 (2026-10-09): fork `catapultam/apollo-microphone`, branch `live-resize` = `0affdaa6` + 4 commits: a build-only `.github/workflows/build-windows.yml` (runner's MSYS2 at `C:\msys64` with `release: false`, because `cmake/targets/common.cmake` finds `npm-cli.js` only there), the `moonlight-common-c` submodule URL set to `logabell/moonlight-common-c` (pinned `6a276a66` is on no branch; GitHub serves it by hash), and `#define DATA_SHARDS_MAX 255` in `src/stream.cpp` (the upstream-based mic `moonlight-common-c` does not include an `rs.h` that defines it; the installed host build was a local dirty build with the same gap). Run `37974002618` passed and produced `Apollo.exe` (NSIS installer) and `Apollo.zip`. The merge of `99794062` (`99b4b76f`) removed the `DATA_SHARDS_MAX` define from `src/stream.cpp`, because `99794062` defines it in `src/rswrapper.h`. It also set the submodule pointer to `784fa1d0` (in `logabell/moonlight-common-c`). |
 | R5 | The encoder rejects the new size and `capture_async` spins (pre-existing bug made reachable). | Section 4.4 step 5 adds the revert. Test it by sending a size above the H.264 limit with the limit check disabled. |
 | R6 | The decoded frame at the new size reaches a renderer before the recreate and crashes `SdlRenderer`. | Section 5.4 drops the frame. Test with `--video-decoder software` and the SDL renderer path forced. |
 | R7 | On GNOME Wayland `SDL_GetWindowSizeInPixels` reports a size that differs from the real buffer with fractional scaling, or the full-screen value is the emulated mode. | Resolved by spike S3 (2026-10-09): windowed and borderless full-screen sizes are physical pixels at 100 % and 125 % scale (window size, pixel size and Vulkan drawable size are equal). Exclusive full screen reports the emulated mode; D9 uses the desktop mode there. |
