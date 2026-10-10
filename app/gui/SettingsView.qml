@@ -1583,6 +1583,23 @@ Flickable {
                 }
 
                 CheckBox {
+                    id: autoLiveResizeCheck
+                    hoverEnabled: true
+                    width: parent.width
+                    text: qsTr("Resize the host display to the stream window automatically")
+                    font.pointSize: 12
+                    checked: StreamingPreferences.autoLiveResize
+                    onCheckedChanged: {
+                        StreamingPreferences.autoLiveResize = checked
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("When the stream window changes size, the host display changes to the same size. This works only with a host that supports live resize. Ctrl+Alt+Shift+W does the same resize one time.")
+                }
+
+                CheckBox {
                     id: swapMouseButtonsCheck
                     hoverEnabled: true
                     width: parent.width

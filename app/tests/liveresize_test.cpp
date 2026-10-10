@@ -60,6 +60,7 @@ static void testReasonText()
     assert(strcmp(LiveResize::reasonText(LiveResize::ReasonDisplayFailed, 0, 0, text, sizeof(text)), "Host could not change the display") == 0);
     assert(strcmp(LiveResize::reasonText(LiveResize::ReasonEncoderFailed, 0, 0, text, sizeof(text)), "Host encoder rejected the size") == 0);
     assert(strcmp(LiveResize::reasonText(LiveResize::ReasonNotSupported, 0, 0, text, sizeof(text)), "Host does not support live resize") == 0);
+    assert(strcmp(LiveResize::reasonText(LiveResize::ReasonTimeout, 0, 0, text, sizeof(text)), "Host did not answer the resize request") == 0);
     // An unknown code from a newer host still gives a message
     assert(strcmp(LiveResize::reasonText(42, 0, 0, text, sizeof(text)), "Host refused the resize (reason 42)") == 0);
 }
@@ -206,6 +207,387 @@ static void testDecoderRecreate()
     assert(width == 1900 && height == 1060);
 }
 
+// A controller with a request of 1920x1080 (id 1) in flight. The stream is 2560x1600.
+static void sendFirst(LiveResize::ResizeController& c, uint32_t now)
+{
+    int w, h;
+    bool manual;
+    c.setTarget(1920, 1080, false, now);
+    assert(!c.takeSend(2560, 1600, now + 499, w, h, manual));
+    assert(c.takeSend(2560, 1600, now + 500, w, h, manual));
+    assert(w == 1920 && h == 1080 && !manual);
+    c.sent(w, h, 1, manual);
+    assert(c.inFlight.active && c.inFlight.requestId == 1);
+}
+
+static void testControllerDebounce()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    // No target: nothing to send and nothing to wait for
+    assert(!c.takeSend(2560, 1600, 0, w, h, manual));
+    assert(c.wakeDelayMs(0) == -1);
+
+    // A new target waits 500 ms
+    c.setTarget(1920, 1080, false, 1000);
+    assert(c.wakeDelayMs(1000) == 500);
+    assert(c.wakeDelayMs(1200) == 300);
+
+    // The same target again does not restart the wait
+    c.setTarget(1920, 1080, false, 1300);
+    assert(c.wakeDelayMs(1300) == 200);
+
+    // A different target restarts the wait
+    c.setTarget(1900, 1060, false, 1400);
+    assert(!c.takeSend(2560, 1600, 1500, w, h, manual));
+    assert(c.wakeDelayMs(1500) == 400);
+    assert(c.takeSend(2560, 1600, 1900, w, h, manual));
+    assert(w == 1900 && h == 1060 && !manual);
+    c.sent(w, h, 1, manual);
+
+    // Nothing waits while a request is in flight
+    assert(c.wakeDelayMs(1900) == -1);
+}
+
+static void testControllerTickWrap()
+{
+    // SDL_GetTicks() wraps after 49 days; the wait must still be 500 ms
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+    uint32_t start = 0xFFFFFF00u;
+
+    c.setTarget(1920, 1080, false, start);
+    assert(!c.takeSend(2560, 1600, start + 499, w, h, manual));
+    assert(c.takeSend(2560, 1600, start + 500, w, h, manual));
+}
+
+static void testControllerEqualToCurrent()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    // A target equal to the stream size does nothing
+    c.setTarget(2560, 1600, false, 0);
+    assert(!c.takeSend(2560, 1600, 1000, w, h, manual));
+    assert(c.wakeDelayMs(1000) == -1);
+
+    // Also for a manual request
+    c.setTarget(2560, 1600, true, 0);
+    assert(!c.takeSend(2560, 1600, 0, w, h, manual));
+    assert(c.wakeDelayMs(0) == -1);
+}
+
+static void testControllerRapidTargets()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+
+    // A drag during the request: many targets, the last one wins
+    c.setTarget(1800, 1000, false, 600);
+    c.setTarget(1700, 980, false, 650);
+    c.setTarget(1600, 900, false, 700);
+    c.setTarget(1600, 900, false, 750);
+    assert(!c.takeSend(2560, 1600, 1500, w, h, manual));
+
+    // The request in flight completes
+    c.ended();
+    assert(c.takeSend(1920, 1080, 1500, w, h, manual));
+    assert(w == 1600 && h == 900);
+    c.sent(w, h, 2, manual);
+
+    // Exactly one follow-up send
+    c.ended();
+    assert(!c.takeSend(1600, 900, 5000, w, h, manual));
+    assert(c.wakeDelayMs(5000) == -1);
+}
+
+static void testControllerFollowUpDebounce()
+{
+    // The follow-up waits until its own target is stable for 500 ms
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+    c.setTarget(1600, 900, false, 1000);
+    c.ended();
+    assert(!c.takeSend(1920, 1080, 1200, w, h, manual));
+    assert(c.wakeDelayMs(1200) == 300);
+    assert(c.takeSend(1920, 1080, 1500, w, h, manual));
+    assert(w == 1600 && h == 900);
+}
+
+static void testControllerDuplicateTargets()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+
+    // The size in flight again: nothing more to send after it completes
+    c.setTarget(1920, 1080, false, 600);
+    c.ended();
+    assert(!c.takeSend(1920, 1080, 2000, w, h, manual));
+
+    // The same size as the stream: nothing
+    c.setTarget(1920, 1080, false, 3000);
+    assert(!c.takeSend(1920, 1080, 4000, w, h, manual));
+
+    // A target that goes away and comes back to the size in flight
+    LiveResize::ResizeController d;
+    sendFirst(d, 0);
+    d.setTarget(1600, 900, false, 600);
+    d.setTarget(1920, 1080, false, 700);
+    d.ended();
+    assert(!d.takeSend(1920, 1080, 2000, w, h, manual));
+
+    // The stream size comes back while a request is in flight: the latest target
+    // (the old stream size) differs from the new stream size, so send it
+    LiveResize::ResizeController e;
+    sendFirst(e, 0);
+    e.setTarget(2560, 1600, false, 600);
+    e.ended();
+    assert(e.takeSend(1920, 1080, 1100, w, h, manual));
+    assert(w == 2560 && h == 1600);
+}
+
+static void testControllerBusyRetry()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+
+    LiveResize::RefusalAction action = c.refused(1, LiveResize::ReasonBusy, 1000);
+    assert(action.matched && !action.show);
+    assert(!c.inFlight.active);
+
+    // Retry the same size after 1 s
+    assert(c.wakeDelayMs(1000) == 1000);
+    assert(!c.takeSend(2560, 1600, 1999, w, h, manual));
+    assert(c.takeSend(2560, 1600, 2000, w, h, manual));
+    assert(w == 1920 && h == 1080);
+    c.sent(w, h, 2, manual);
+
+    // BUSY with a newer target: retry the newer target after 1 s
+    c.setTarget(1600, 900, false, 2100);
+    action = c.refused(2, LiveResize::ReasonBusy, 2200);
+    assert(action.matched && !action.show);
+    assert(!c.takeSend(2560, 1600, 3100, w, h, manual));
+    assert(c.takeSend(2560, 1600, 3200, w, h, manual));
+    assert(w == 1600 && h == 900);
+}
+
+static void testControllerRefusalNoRetry()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+
+    LiveResize::RefusalAction action = c.refused(1, LiveResize::ReasonSizeLimit, 1000);
+    assert(action.matched && action.show);
+    assert(action.width == 1920 && action.height == 1080);
+    assert(!c.inFlight.active);
+
+    // The same size is not tried again automatically
+    assert(!c.takeSend(2560, 1600, 5000, w, h, manual));
+    c.setTarget(1600, 900, false, 6000);
+    c.setTarget(1920, 1080, false, 6100);
+    assert(!c.takeSend(2560, 1600, 7000, w, h, manual));
+    assert(c.wakeDelayMs(7000) == -1);
+
+    // A different size is tried
+    c.setTarget(1600, 900, false, 8000);
+    assert(c.takeSend(2560, 1600, 8500, w, h, manual));
+    assert(w == 1600 && h == 900);
+    c.sent(w, h, 2, manual);
+
+    // The same reason for a different size is shown once
+    action = c.refused(2, LiveResize::ReasonSizeLimit, 9000);
+    assert(action.matched && action.show);
+
+    // A manual request of a refused size is sent, and its refusal is shown again
+    c.setTarget(1920, 1080, true, 10000);
+    assert(c.takeSend(2560, 1600, 10000, w, h, manual));
+    assert(w == 1920 && h == 1080 && manual);
+    c.sent(w, h, 3, manual);
+    action = c.refused(3, LiveResize::ReasonSizeLimit, 10500);
+    assert(action.matched && action.show);
+}
+
+static void testControllerShowOnce()
+{
+    // An automatic request of a size that was refused manually: not sent, so not
+    // shown again. A refusal of the same size with a new reason is shown.
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    c.setTarget(1920, 1080, true, 0);
+    assert(c.takeSend(2560, 1600, 0, w, h, manual));
+    c.sent(w, h, 1, manual);
+    LiveResize::RefusalAction action = c.refused(1, LiveResize::ReasonMultipleClients, 100);
+    assert(action.show);
+
+    c.setTarget(1920, 1080, false, 1000);
+    assert(!c.takeSend(2560, 1600, 2000, w, h, manual));
+
+    c.setTarget(1920, 1080, true, 3000);
+    assert(c.takeSend(2560, 1600, 3000, w, h, manual));
+    c.sent(w, h, 2, manual);
+    action = c.refused(2, LiveResize::ReasonDisplayFailed, 3100);
+    assert(action.show);
+
+    // Automatic: the same (reason, size) a second time is not shown
+    LiveResize::ResizeController d;
+    sendFirst(d, 0);
+    action = d.refused(1, LiveResize::ReasonDisplayFailed, 1000);
+    assert(action.show);
+    d.setTarget(1600, 900, false, 2000);
+    assert(d.takeSend(2560, 1600, 2500, w, h, manual));
+    d.sent(w, h, 2, manual);
+    action = d.refused(2, LiveResize::ReasonDisplayFailed, 3000);
+    assert(action.show);
+    // An automatic request of 1600x900 gets the same refusal again: not shown.
+    // (Only a manual request can send a refused size; here it is sent as automatic.)
+    d.setTarget(1600, 900, true, 4000);
+    assert(d.takeSend(2560, 1600, 4000, w, h, manual));
+    d.sent(w, h, 3, false);
+    action = d.refused(3, LiveResize::ReasonDisplayFailed, 4500);
+    assert(action.matched && !action.show);
+}
+
+static void testControllerOldRefusal()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+
+    // A refusal for another request id is ignored
+    LiveResize::RefusalAction action = c.refused(7, LiveResize::ReasonSizeLimit, 1000);
+    assert(!action.matched && !action.show);
+    assert(c.inFlight.active && c.inFlight.requestId == 1);
+
+    // Also after the request completed
+    c.ended();
+    action = c.refused(1, LiveResize::ReasonSizeLimit, 2000);
+    assert(!action.matched && !action.show);
+
+    // The size was not marked as refused
+    c.setTarget(1600, 900, false, 3000);
+    assert(c.takeSend(1920, 1080, 3500, w, h, manual));
+    c.sent(w, h, 2, manual);
+    c.ended();
+    c.setTarget(1920, 1080, false, 4000);
+    assert(c.takeSend(1600, 900, 4500, w, h, manual));
+}
+
+static void testControllerTimeout()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+
+    // A timeout for another request id is ignored
+    LiveResize::RefusalAction action = c.timedOut(5);
+    assert(!action.matched);
+    assert(c.inFlight.active);
+
+    // The timeout ends the request and is shown once for this size
+    c.setTarget(1920, 1080, false, 500);
+    action = c.timedOut(1);
+    assert(action.matched && action.show);
+    assert(!c.inFlight.active);
+
+    // The size is not sent again automatically
+    assert(!c.takeSend(2560, 1600, 20000, w, h, manual));
+
+    // A different size is sent
+    c.setTarget(1600, 900, false, 21000);
+    assert(c.takeSend(2560, 1600, 21500, w, h, manual));
+    c.sent(w, h, 2, manual);
+    action = c.timedOut(2);
+    assert(action.matched && action.show);
+}
+
+static void testControllerManual()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    // A manual request with nothing in flight is sent at once
+    c.setTarget(1920, 1080, true, 0);
+    assert(c.wakeDelayMs(0) == 0);
+    assert(c.takeSend(2560, 1600, 0, w, h, manual));
+    assert(w == 1920 && h == 1080 && manual);
+    c.sent(w, h, 1, manual);
+    assert(c.inFlightManual);
+
+    // A manual request while one is in flight fills the next size slot
+    c.setTarget(1600, 900, true, 100);
+    assert(!c.takeSend(2560, 1600, 100, w, h, manual));
+    c.ended();
+    assert(c.takeSend(1920, 1080, 200, w, h, manual));
+    assert(w == 1600 && h == 900 && manual);
+    c.sent(w, h, 2, manual);
+
+    // A manual refusal is always shown, BUSY too
+    LiveResize::RefusalAction action = c.refused(2, LiveResize::ReasonBusy, 300);
+    assert(action.matched && action.show);
+    // The BUSY retry of a manual request also waits 1 s
+    assert(!c.takeSend(1920, 1080, 1299, w, h, manual));
+    assert(c.takeSend(1920, 1080, 1300, w, h, manual));
+    assert(w == 1600 && h == 900 && manual);
+    c.sent(w, h, 3, manual);
+    c.ended();
+
+    // An automatic target after a manual one wins and waits for the debounce
+    sendFirst(c, 5000);
+    c.setTarget(1280, 720, true, 5600);
+    c.setTarget(1366, 768, false, 5700);
+    c.ended();
+    assert(!c.takeSend(1920, 1080, 6000, w, h, manual));
+    assert(c.takeSend(1920, 1080, 6200, w, h, manual));
+    assert(w == 1366 && h == 768 && !manual);
+
+    // A manual target after an automatic one is sent at once
+    LiveResize::ResizeController d;
+    d.setTarget(1280, 720, false, 0);
+    d.setTarget(1366, 768, true, 100);
+    assert(d.takeSend(2560, 1600, 100, w, h, manual));
+    assert(w == 1366 && h == 768 && manual);
+}
+
+static void testControllerReset()
+{
+    LiveResize::ResizeController c;
+    int w, h;
+    bool manual;
+
+    sendFirst(c, 0);
+    c.setTarget(1600, 900, false, 600);
+    c.reset();
+    assert(!c.inFlight.active);
+    assert(!c.takeSend(2560, 1600, 5000, w, h, manual));
+    assert(c.wakeDelayMs(5000) == -1);
+}
+
 int main()
 {
     testRoundDownEven();
@@ -215,6 +597,19 @@ int main()
     testNewStreamSize();
     testOldFrameAfterRequest();
     testDecoderRecreate();
+    testControllerDebounce();
+    testControllerTickWrap();
+    testControllerEqualToCurrent();
+    testControllerRapidTargets();
+    testControllerFollowUpDebounce();
+    testControllerDuplicateTargets();
+    testControllerBusyRetry();
+    testControllerRefusalNoRetry();
+    testControllerShowOnce();
+    testControllerOldRefusal();
+    testControllerTimeout();
+    testControllerManual();
+    testControllerReset();
     puts("liveresize_test: all checks passed");
     return 0;
 }

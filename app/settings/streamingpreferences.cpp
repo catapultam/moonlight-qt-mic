@@ -50,6 +50,7 @@
 #define SER_MICROPHONEDEVICE "microphonedevice"
 #define SER_SWAPMOUSEBUTTONS "swapmousebuttons"
 #define SER_MUTEONFOCUSLOSS "muteonfocusloss"
+#define SER_AUTOLIVERESIZE "autoliveresize"
 #define SER_BACKGROUNDGAMEPAD "backgroundgamepad"
 #define SER_REVERSESCROLL "reversescroll"
 #define SER_SCROLLMULTIPLIER "scrollmultiplier"
@@ -173,6 +174,7 @@ void StreamingPreferences::reload()
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
     muteOnFocusLoss = settings.value(SER_MUTEONFOCUSLOSS, false).toBool();
+    autoLiveResize = settings.value(SER_AUTOLIVERESIZE, false).toBool();
     backgroundGamepad = settings.value(SER_BACKGROUNDGAMEPAD, false).toBool();
     reverseScrollDirection = settings.value(SER_REVERSESCROLL, false).toBool();
     scrollMultiplier = qBound(0.0, settings.value(SER_SCROLLMULTIPLIER, 1.0).toDouble(), 10.0);
@@ -390,6 +392,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_DEFAULTVER, CURRENT_DEFAULT_VER);
     settings.setValue(SER_SWAPMOUSEBUTTONS, swapMouseButtons);
     settings.setValue(SER_MUTEONFOCUSLOSS, muteOnFocusLoss);
+    settings.setValue(SER_AUTOLIVERESIZE, autoLiveResize);
     settings.setValue(SER_BACKGROUNDGAMEPAD, backgroundGamepad);
     settings.setValue(SER_REVERSESCROLL, reverseScrollDirection);
     settings.setValue(SER_SCROLLMULTIPLIER, scrollMultiplier);

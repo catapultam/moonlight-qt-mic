@@ -10,6 +10,10 @@
 // data1 = width, data2 = height. The session recreates the decoder.
 #define SDL_CODE_STREAM_SIZE_CHANGED 106
 
+// Pushed by a decoder once, when it decoded its first frame. The session uses
+// it for the automatic live resize.
+#define SDL_CODE_FIRST_FRAME_DECODED 111
+
 #define MAX_SLICES 4
 
 typedef struct _VIDEO_STATS {

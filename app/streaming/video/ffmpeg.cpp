@@ -245,6 +245,7 @@ FFmpegVideoDecoder::FFmpegVideoDecoder(bool testOnly)
       m_LastFrameHeight(0),
       m_RequestFrameWidth(0),
       m_RequestFrameHeight(0),
+      m_FirstFrameNotified(false),
       m_VideoFormat(0),
       m_NeedsSpsFixup(false),
       m_TestOnly(testOnly),
@@ -2098,6 +2099,15 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         av_frame_free(&frame);
                     }
                     else {
+                        if (!m_FirstFrameNotified) {
+                            // Tell the session that this decoder works
+                            SDL_Event event = {};
+                            event.type = SDL_USEREVENT;
+                            event.user.code = SDL_CODE_FIRST_FRAME_DECODED;
+                            SDL_PushEvent(&event);
+                            m_FirstFrameNotified = true;
+                        }
+
                         // Queue the frame for rendering (or render now if pacer is disabled)
                         m_Pacer->submitFrame(frame);
                     }

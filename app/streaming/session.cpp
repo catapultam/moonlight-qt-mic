@@ -32,6 +32,8 @@
 #define SDL_CODE_RESIZE_REFUSED 107
 #define SDL_CODE_RESIZE_TIMEOUT 108
 #define SDL_CODE_RESIZE_STATUS_TIMEOUT 109
+#define SDL_CODE_RESIZE_PUMP 110
+// SDL_CODE_FIRST_FRAME_DECODED is 111 (decoder.h)
 
 // Time to wait for the first frame at the new size
 #define RESIZE_TIMEOUT_MS 10000
@@ -314,6 +316,18 @@ Uint32 Session::resizeTimeoutTimerCallback(Uint32, void* param)
     return 0;
 }
 
+Uint32 Session::resizePumpTimerCallback(Uint32, void* param)
+{
+    SDL_Event event = {};
+    event.type = SDL_USEREVENT;
+    event.user.code = SDL_CODE_RESIZE_PUMP;
+    event.user.data1 = param;
+    SDL_PushEvent(&event);
+
+    // One shot
+    return 0;
+}
+
 Uint32 Session::statusOverlayTimerCallback(Uint32, void* param)
 {
     SDL_Event event = {};
@@ -349,8 +363,6 @@ void Session::showResizeStatus(const char* text)
 
 void Session::clearPendingResize()
 {
-    m_PendingResize.clear();
-
     SDL_LockMutex(m_DecoderLock);
     if (m_VideoDecoder != nullptr) {
         m_VideoDecoder->setExpectedFrameSize(0, 0);
@@ -363,28 +375,22 @@ void Session::clearPendingResize()
     }
 }
 
-void Session::requestLiveResize()
+bool Session::getLiveResizeTarget(int& width, int& height, bool manual)
 {
-    int width, height;
-
-    if (!LiIsLiveResizeSupported()) {
-        showResizeStatus("Host does not support live resize");
-        return;
-    }
-
-    if (m_PendingResize.active) {
-        showResizeStatus("Resize in progress");
-        return;
-    }
-
     if ((SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN) {
         // Exclusive full screen reports the emulated mode, so read the desktop mode
         SDL_DisplayMode mode;
         SDL_Rect safeArea;
 
         if (!StreamUtils::getNativeDesktopMode(SDL_GetWindowDisplayIndex(m_Window), &mode, &safeArea)) {
-            showResizeStatus("Cannot read the display mode");
-            return;
+            if (manual) {
+                showResizeStatus("Cannot read the display mode");
+            }
+            else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Live resize: cannot read the display mode");
+            }
+            return false;
         }
 
         width = mode.w;
@@ -396,44 +402,133 @@ void Session::requestLiveResize()
     }
 
     LiveResize::roundDownEven(width, height);
+    return true;
+}
 
-    if (width == m_ActiveVideoWidth && height == m_ActiveVideoHeight) {
+void Session::requestLiveResize()
+{
+    int width, height;
+
+    if (!LiIsLiveResizeSupported()) {
+        showResizeStatus("Host does not support live resize");
+        return;
+    }
+
+    if (!getLiveResizeTarget(width, height, true)) {
+        return;
+    }
+
+    if (width == m_ActiveVideoWidth && height == m_ActiveVideoHeight && !m_ResizeState.inFlight.active) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Live resize: stream is already %dx%d", width, height);
+    }
+
+    // The manual request shares the slot with the automatic requests. When a
+    // request is in flight, this size is sent after it.
+    m_ResizeState.setTarget(width, height, true, SDL_GetTicks());
+    pumpLiveResize();
+}
+
+void Session::triggerAutoLiveResize()
+{
+    int width, height;
+
+    if (!m_Preferences->autoLiveResize || !m_AutoResizeArmed) {
         return;
     }
 
-    uint32_t requestId;
-    if (LiSendResizeRequest((uint16_t)width, (uint16_t)height, &requestId) != 0) {
-        showResizeStatus("Could not send the resize request");
+    if (!LiIsLiveResizeSupported()) {
+        if (!m_AutoResizeUnsupportedLogged) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Live resize: host does not support live resize; automatic resize is off");
+            m_AutoResizeUnsupportedLogged = true;
+        }
         return;
     }
 
-    m_PendingResize.begin(width, height, requestId);
-
-    SDL_LockMutex(m_DecoderLock);
-    if (m_VideoDecoder != nullptr) {
-        m_VideoDecoder->setExpectedFrameSize(width, height);
+    if (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_MINIMIZED) {
+        return;
     }
-    SDL_UnlockMutex(m_DecoderLock);
 
-    m_ResizeTimeoutTimer = SDL_AddTimer(RESIZE_TIMEOUT_MS, resizeTimeoutTimerCallback, (void*)(uintptr_t)requestId);
+    if (!getLiveResizeTarget(width, height, false) || width == 0 || height == 0) {
+        return;
+    }
 
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Requested live resize from %dx%d to %dx%d (request %u)",
-                m_ActiveVideoWidth, m_ActiveVideoHeight, width, height, requestId);
+    m_ResizeState.setTarget(width, height, false, SDL_GetTicks());
+}
+
+void Session::pumpLiveResize()
+{
+    if (m_ResizePumpTimer != 0) {
+        SDL_RemoveTimer(m_ResizePumpTimer);
+        m_ResizePumpTimer = 0;
+    }
+
+    if (m_ResizeWaitingForFrame) {
+        // SDL_CODE_FIRST_FRAME_DECODED of the new decoder calls us again
+        return;
+    }
+
+    // Read the window size again. On some platforms the full-screen flag
+    // changes after the last size event. The same size does not restart the
+    // debounce.
+    triggerAutoLiveResize();
+
+    int width, height;
+    bool manual;
+    while (m_ResizeState.takeSend(m_ActiveVideoWidth, m_ActiveVideoHeight, SDL_GetTicks(), width, height, manual)) {
+        uint32_t requestId;
+        if (LiSendResizeRequest((uint16_t)width, (uint16_t)height, &requestId) != 0) {
+            if (manual) {
+                showResizeStatus("Could not send the resize request");
+            }
+            else {
+                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                            "Live resize: could not send the request for %dx%d", width, height);
+            }
+            continue;
+        }
+
+        m_ResizeState.sent(width, height, requestId, manual);
+
+        SDL_LockMutex(m_DecoderLock);
+        if (m_VideoDecoder != nullptr) {
+            m_VideoDecoder->setExpectedFrameSize(width, height);
+        }
+        SDL_UnlockMutex(m_DecoderLock);
+
+        m_ResizeTimeoutTimer = SDL_AddTimer(RESIZE_TIMEOUT_MS, resizeTimeoutTimerCallback, (void*)(uintptr_t)requestId);
+
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Requested %s live resize from %dx%d to %dx%d (request %u)",
+                    manual ? "manual" : "automatic",
+                    m_ActiveVideoWidth, m_ActiveVideoHeight, width, height, requestId);
+    }
+
+    int32_t delay = m_ResizeState.wakeDelayMs(SDL_GetTicks());
+    if (delay >= 0) {
+        // takeSend() sends when the delay is 0, so a delay of 0 cannot stay here.
+        // Use 1 ms as the lower limit in case the time moved on.
+        m_ResizePumpGeneration++;
+        m_ResizePumpTimer = SDL_AddTimer(delay > 0 ? (Uint32)delay : 1, resizePumpTimerCallback,
+                                         (void*)(uintptr_t)m_ResizePumpGeneration);
+    }
 }
 
 void Session::applyStreamSize(int width, int height)
 {
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Video stream is now %dx%d", width, height);
 
-    if (m_PendingResize.active && !m_PendingResize.matchesFrame(width, height)) {
+    if (m_ResizeState.inFlight.active && !m_ResizeState.inFlight.matchesFrame(width, height)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Stream size %dx%d differs from the requested %dx%d",
-                    width, height, m_PendingResize.width, m_PendingResize.height);
+                    width, height, m_ResizeState.inFlight.width, m_ResizeState.inFlight.height);
     }
+    m_ResizeState.ended();
     clearPendingResize();
+
+    // Send the next request only after the new decoder decoded a frame
+    m_ResizeWaitingForFrame = true;
 
     // These feed chooseDecoder() in the reset handler and the mouse scaling
     m_ActiveVideoWidth = width;
@@ -764,6 +859,11 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_MicrophoneEnabled(false),
       m_StatusOverlayOwner(StatusOverlayOwner::None),
       m_ResizeTimeoutTimer(0),
+      m_ResizePumpTimer(0),
+      m_ResizePumpGeneration(0),
+      m_AutoResizeArmed(false),
+      m_AutoResizeUnsupportedLogged(false),
+      m_ResizeWaitingForFrame(false),
       m_StatusOverlayTimer(0),
       m_StatusOverlayGeneration(0)
 {
@@ -2295,23 +2395,57 @@ void Session::exec()
                 uint32_t requestId = (uint32_t)(uintptr_t)event.user.data1;
                 uint16_t reason = (uint16_t)(uintptr_t)event.user.data2;
 
-                if (!m_PendingResize.matchesRefusal(requestId)) {
+                LiveResize::RefusalAction action = m_ResizeState.refused(requestId, reason, SDL_GetTicks());
+                if (!action.matched) {
                     SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                                 "Ignoring refusal of resize request %u (not pending)", requestId);
                     break;
                 }
 
                 char text[128];
-                LiveResize::reasonText(reason, m_PendingResize.width, m_PendingResize.height, text, sizeof(text));
+                LiveResize::reasonText(reason, action.width, action.height, text, sizeof(text));
                 clearPendingResize();
-                showResizeStatus(text);
+                if (action.show) {
+                    showResizeStatus(text);
+                }
+                else {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Live resize: %s (not shown again)", text);
+                }
+                pumpLiveResize();
                 break;
             }
-            case SDL_CODE_RESIZE_TIMEOUT:
-                if (m_PendingResize.matchesRefusal((uint32_t)(uintptr_t)event.user.data1)) {
+            case SDL_CODE_RESIZE_TIMEOUT: {
+                LiveResize::RefusalAction action = m_ResizeState.timedOut((uint32_t)(uintptr_t)event.user.data1);
+                if (action.matched) {
+                    char text[128];
+                    LiveResize::reasonText(LiveResize::ReasonTimeout, action.width, action.height, text, sizeof(text));
                     clearPendingResize();
-                    showResizeStatus("Host did not answer the resize request");
+                    if (action.show) {
+                        showResizeStatus(text);
+                    }
+                    else {
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "Live resize: %s (not shown again)", text);
+                    }
+                    pumpLiveResize();
                 }
+                break;
+            }
+            case SDL_CODE_RESIZE_PUMP:
+                if ((uint32_t)(uintptr_t)event.user.data1 != m_ResizePumpGeneration) {
+                    // A timer that fired before its removal
+                    break;
+                }
+                m_ResizePumpTimer = 0;
+                pumpLiveResize();
+                break;
+            case SDL_CODE_FIRST_FRAME_DECODED:
+                // Each new decoder sends this once
+                m_ResizeWaitingForFrame = false;
+                // At stream start this arms the automatic triggers. A window
+                // manager can still change the window size now; the debounce
+                // waits for it.
+                m_AutoResizeArmed = true;
+                pumpLiveResize();
                 break;
             case SDL_CODE_RESIZE_STATUS_TIMEOUT:
                 if ((uint32_t)(uintptr_t)event.user.data1 != m_StatusOverlayGeneration) {
@@ -2346,6 +2480,13 @@ void Session::exec()
                 break;
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();
+                break;
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
+                // Drag, tiling and full-screen changes. pumpLiveResize() reads
+                // the new target, and the debounce waits until it is stable.
+                if (m_Preferences->autoLiveResize && m_AutoResizeArmed) {
+                    pumpLiveResize();
+                }
                 break;
             }
 
@@ -2526,8 +2667,8 @@ void Session::exec()
                 // A new decoder has no expected size. Set it again when a resize
                 // request is pending (device reset or display change), so that the
                 // new decoder finds the requested size.
-                if (m_PendingResize.active) {
-                    m_VideoDecoder->setExpectedFrameSize(m_PendingResize.width, m_PendingResize.height);
+                if (m_ResizeState.inFlight.active) {
+                    m_VideoDecoder->setExpectedFrameSize(m_ResizeState.inFlight.width, m_ResizeState.inFlight.height);
                 }
             }
 
@@ -2611,7 +2752,12 @@ DispatchDeferredCleanup:
     StreamUtils::exitAsyncLoggingMode();
 
     // Stop the live resize timers before this object can go away
+    m_ResizeState.reset();
     clearPendingResize();
+    if (m_ResizePumpTimer != 0) {
+        SDL_RemoveTimer(m_ResizePumpTimer);
+        m_ResizePumpTimer = 0;
+    }
     if (m_StatusOverlayTimer != 0) {
         SDL_RemoveTimer(m_StatusOverlayTimer);
         m_StatusOverlayTimer = 0;

@@ -173,6 +173,7 @@ public:
     Q_PROPERTY(UIDisplayMode uiDisplayMode MEMBER uiDisplayMode NOTIFY uiDisplayModeChanged)
     Q_PROPERTY(bool swapMouseButtons MEMBER swapMouseButtons NOTIFY mouseButtonsChanged)
     Q_PROPERTY(bool muteOnFocusLoss MEMBER muteOnFocusLoss NOTIFY muteOnFocusLossChanged)
+    Q_PROPERTY(bool autoLiveResize MEMBER autoLiveResize NOTIFY autoLiveResizeChanged)
     Q_PROPERTY(bool backgroundGamepad MEMBER backgroundGamepad NOTIFY backgroundGamepadChanged)
     Q_PROPERTY(bool reverseScrollDirection MEMBER reverseScrollDirection NOTIFY reverseScrollDirectionChanged)
     Q_PROPERTY(qreal scrollMultiplier MEMBER scrollMultiplier NOTIFY scrollMultiplierChanged)
@@ -217,6 +218,7 @@ public:
     QString microphoneDevice;
     bool swapMouseButtons;
     bool muteOnFocusLoss;
+    bool autoLiveResize;
     bool backgroundGamepad;
     bool reverseScrollDirection;
     qreal scrollMultiplier;
@@ -271,6 +273,7 @@ signals:
     void microphoneMonitorSignalDetectedChanged();
     void mouseButtonsChanged();
     void muteOnFocusLossChanged();
+    void autoLiveResizeChanged();
     void backgroundGamepadChanged();
     void reverseScrollDirectionChanged();
     void scrollMultiplierChanged();

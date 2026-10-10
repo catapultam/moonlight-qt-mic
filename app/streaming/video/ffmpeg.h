@@ -140,6 +140,7 @@ private:
     int m_LastFrameHeight;
     int m_RequestFrameWidth;
     int m_RequestFrameHeight;
+    bool m_FirstFrameNotified;
     int m_VideoFormat;
     bool m_NeedsSpsFixup;
     bool m_TestOnly;

@@ -241,11 +241,26 @@ private:
     static
     Uint32 statusOverlayTimerCallback(Uint32 interval, void* param);
 
+    static
+    Uint32 resizePumpTimerCallback(Uint32 interval, void* param);
+
     // Shows a live resize message in the status overlay for a few seconds
     void showResizeStatus(const char* text);
 
-    // Forgets the pending request and stops its timeout
+    // Stops the timeout of the request in flight and removes the expected
+    // size from the decoder. The caller updates m_ResizeState.
     void clearPendingResize();
+
+    // Writes the target size for a live resize (spec D9, D4). Returns false
+    // when the size cannot be read. For a manual request it shows the reason.
+    bool getLiveResizeTarget(int& width, int& height, bool manual);
+
+    // Sets the window size as the automatic target when the setting is on
+    void triggerAutoLiveResize();
+
+    // Sends the next request when the rules allow it, else starts the timer
+    // for the next check
+    void pumpLiveResize();
 
     // Takes the new stream size from the decoder and recreates the decoder
     void applyStreamSize(int width, int height);
@@ -320,8 +335,20 @@ private:
         Resize,
     };
     StatusOverlayOwner m_StatusOverlayOwner;
-    LiveResize::PendingRequest m_PendingResize;
+    LiveResize::ResizeController m_ResizeState;
     SDL_TimerID m_ResizeTimeoutTimer;
+    // One-shot timer of the debounce and the BUSY retry
+    SDL_TimerID m_ResizePumpTimer;
+    // Counts the pump timers; a timer event from an older timer is ignored
+    uint32_t m_ResizePumpGeneration;
+    // True after the first decoded frame, when the automatic triggers work
+    bool m_AutoResizeArmed;
+    // The automatic mode logs a host without live resize once
+    bool m_AutoResizeUnsupportedLogged;
+    // True from a stream size change until the new decoder decodes a frame.
+    // No request is sent then, so that the new decoder knows its last frame
+    // before the request (spec 5.4).
+    bool m_ResizeWaitingForFrame;
     SDL_TimerID m_StatusOverlayTimer;
     // Counts showResizeStatus() calls; a timer event from an older call is ignored
     uint32_t m_StatusOverlayGeneration;
