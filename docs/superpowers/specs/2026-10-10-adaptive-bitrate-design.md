@@ -330,7 +330,7 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `INC_STEP_NEAR_PCT` | 3 | Increase step near the last failure rate |
 | `STABLE_MS` | 4000 | Clean time before an increase |
 | `NEAR_FAILURE_PCT` | 85 | "Near" means the target is >= 85 % of the last failure rate (memory of 60 s) |
-| `APP_LIMITED_PCT` | 70 | Increase only when the measured bitrate is >= 70 % of `encoder_kbps` |
+| `APP_LIMITED_PCT` | 40 | Increase only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %. The end-to-end test with full motion measured only 0.63-0.75 of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
 | `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
 | `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
 | `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
@@ -366,7 +366,9 @@ Rules, in order, at each tick:
    3): no change (D8). Log it at debug level.
 5. Increase: the target is below the ceiling, no lossy window, no delay and
    no FEC pressure for `STABLE_MS`, and the measured bitrate is at least
-   `APP_LIMITED_PCT` of `encoder_kbps`. Step `INC_STEP_PCT`, or
+   `APP_LIMITED_PCT` (40 %) of `encoder_kbps`. The gate stops increases on a
+   static picture. It is not higher because a stream with full motion
+   measures only 0.63-0.75 of `encoder_kbps` end to end. Step `INC_STEP_PCT`, or
    `INC_STEP_NEAR_PCT` when the target is near `lastFailureKbps`. Cap at the
    ceiling.
 6. Apply the minimum intervals and the dead band. If the decision passes,
@@ -937,7 +939,7 @@ with a fake clock:
 5. Heavy loss with RTT rise in one window: a decrease.
 6. Delay only (RTT baseline + 20 ms for 2 s): decrease to 90 %.
 7. FEC pressure only: decrease to 90 %.
-8. Recovery: after `STABLE_MS` with no loss and measured >= 70 %: increase
+8. Recovery: after `STABLE_MS` with no loss and measured >= 40 %: increase
    by 8 %; near `lastFailureKbps`: increase by 3 %.
 9. App-limited: no loss, measured 20 % of the target: no increase.
 10. Floor and ceiling hold.

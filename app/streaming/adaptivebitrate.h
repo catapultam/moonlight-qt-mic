@@ -60,7 +60,11 @@ constexpr uint32_t INC_STEP_NEAR_PCT = 3;
 constexpr uint32_t STABLE_MS = 4000;
 constexpr uint32_t NEAR_FAILURE_PCT = 85;
 constexpr uint32_t FAILURE_MEMORY_MS = 60000;
-constexpr uint32_t APP_LIMITED_PCT = 70;
+// Rule 5: increase only when measured >= this % of the host encoder value. A static
+// picture measures far below 40 %. With full motion the end-to-end test measured only
+// 63-75 % (the host sends fewer frames than the frame rate; the CBR encoder undershoots),
+// so a higher value blocks the increase after the network recovers.
+constexpr uint32_t APP_LIMITED_PCT = 40;
 constexpr uint32_t DEAD_BAND_PCT = 3;
 constexpr uint32_t DEAD_BAND_MIN_KBPS = 250;       // also the smallest increase step (plan)
 constexpr uint32_t MIN_DEC_INTERVAL_MS = 1000;

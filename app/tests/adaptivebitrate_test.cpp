@@ -252,6 +252,35 @@ static void testAppLimited()
     assert(sim.c.targetKbps() == 30000);
 }
 
+// A busy stream measures 63-75 % of the encoder value (end-to-end test). On a clean
+// link this must not block the increase.
+static void testBusyStreamIncreases()
+{
+    Sim sim(40000);
+    sim.runStart();
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 1) > 0 && d.targetKbps == 30000);
+    sim.sendAndAnswer(d);
+    sim.s.measuredMbps = 24.0 * 0.65;  // 65 % of encoder 24000
+    assert(sim.stepUntilSend(d, 60) > 0);
+    assert(d.reason == Reason::Increase && d.targetKbps == 32400);
+}
+
+// A static picture at 10 % of the encoder value: no increase
+static void testStaticStreamNoIncrease()
+{
+    Sim sim(40000);
+    sim.runStart();
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 1) > 0 && d.targetKbps == 30000);
+    sim.sendAndAnswer(d);
+    sim.s.measuredMbps = 24.0 * 0.10;
+    for (int i = 0; i < 120; i++) {
+        assert(!sim.step().send);
+    }
+    assert(sim.c.targetKbps() == 30000);
+}
+
 // Review Focus 3
 static void testMaxCut()
 {
@@ -785,6 +814,8 @@ int main()
     testFecPressure();
     testRecovery();
     testAppLimited();
+    testBusyStreamIncreases();
+    testStaticStreamNoIncrease();
     testMaxCut();
     testFloorAndCeiling();
     testDeadBand();
