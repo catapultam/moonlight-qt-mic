@@ -4026,7 +4026,7 @@ git commit -m "Add the adapt bitrate to the network setting"
 **Interfaces:**
 - Consumes: Task 6 (`LiIsDynamicBitrateSupported()`, `LiSendBitrateRequest()`, `LiGetVideoFrameCounters()`, `LiGetRTPVideoStats()`, `ConnListenerBitrateStatus`, `LI_BITRATE_STATUS_*`), Task 7 (`AdaptiveBitrate::Controller`, `Sample`, `Decision`, `StatusResult`, `formatDecision()`, `formatOverlay()`, `statusName()`, `TICK_MS`, `START_ATTEMPTS`), Task 8 (`StreamingPreferences::adaptiveBitrate`). Existing: `StreamingPreferences::getDefaultBitrate()`, `BandwidthTracker` (`app/streaming/bandwidth.h`), `Session::applyStreamSize()`, `SDL_CODE_FIRST_FRAME_DECODED`.
 - Produces: `int Session::formatBitrateStats(char* output, int length)` (any thread); the client log lines that Task 11 reads:
-  - `Adaptive bitrate: <on|off (a live resize still sets the bitrate)>, limit <kbps> kbps, stream start <kbps> kbps`
+  - `Adaptive bitrate: <on|off (a live resize still sets the bitrate)|off>, limit <kbps> kbps, stream start <kbps> kbps` (the long "off" text only with the default bitrate, `autoAdjustBitrate` on)
   - `Adaptive bitrate: the host does not support bitrate changes; the bitrate stays at <kbps> kbps`
   - `Adaptive bitrate: <from> -> <to> kbps, reason <reason> (loss ..., rtt .../... ms, fec ...%, measured ... Mbps), request <id>`
   - `Adaptive bitrate: request <id> <STATUS>, accepted <kbps> kbps, host encoder <kbps> kbps`
@@ -4602,7 +4602,7 @@ toolbox run -c moonlight env QT_QPA_PLATFORM=wayland SDL_AUDIO_DRIVER=pulseaudio
 
 Watch `/tmp/abr-check.log` with Monitor until two `Adaptive bitrate` lines are there (at most 60 s), then `grep -E "Adaptive bitrate" /tmp/abr-check.log | head -5`.
 
-Expected: `Adaptive bitrate: on, limit <kbps> kbps, stream start <kbps> kbps` and, about 4 s later, a request with `reason start` and an answer `UNCHANGED` or `APPLIED`. Not the line "the host does not support bitrate changes". End the stream (close the window).
+Expected: a line that starts with `Adaptive bitrate: on,` (`Adaptive bitrate: on, limit <kbps> kbps, stream start <kbps> kbps`) and, about 4 s later, a request with `reason start` and an answer `UNCHANGED` or `APPLIED`. Not the line "the host does not support bitrate changes". End the stream (close the window).
 
 - [ ] **Step 7: Record the build in the notes**
 
@@ -4720,11 +4720,11 @@ toolbox run -c moonlight env QT_QPA_PLATFORM=wayland SDL_AUDIO_DRIVER=pulseaudio
 
 Start a Monitor on `tail -F /tmp/abr-client.log | grep --line-buffered -E "Adaptive bitrate|Recreating|Connection status"`.
 
-Expected: `Adaptive bitrate: on, limit 44000 kbps, stream start 44000 kbps` (2560x1600 at 60 fps; `getDefaultBitrate` gives 44000) and the start request with an answer. The overlay shows `Bitrate: target 44.0 Mbps (limit 44.0), host encoder 34.2 Mbps, measured ...`. If the limit is not 44000, the stored bitrate is manual (`autoAdjustBitrate` off): ask the user to press "Use Default" in the settings, then start again.
+Expected: a line that starts with `Adaptive bitrate: on,`: `Adaptive bitrate: on, limit 44000 kbps, stream start 44000 kbps` (2560x1600 at 60 fps; `getDefaultBitrate` gives 44000) and the start request with an answer. The overlay shows `Bitrate: target 44.0 Mbps (limit 44.0), host encoder 34.2 Mbps, measured ...`. If the limit is not 44000, the stored bitrate is manual (`autoAdjustBitrate` off): ask the user to press "Use Default" in the settings, then start again.
 
 - [ ] **Step 4: Run the steps of spec 8.3**
 
-Record each result (the log lines with time) for Step 7. "In place" means: answer `APPLIED` and the line `no key frame after the in-place change of request <id>`.
+Record each result (the log lines with time) for Step 7. "In place" means: answer `APPLIED` and the line `no key frame after the in-place change of request <id>`. Frame loss also makes common-c ask the host for a key frame. Thus a `<n> key frames in about 1 s after the in-place change` warning after a `reason loss` decrease is not always caused by the change: compare with the `Connection status` and loss lines at that time, and look at the host log for an encoder restart. A `reason new limit` request (live resize) has no key frame check, because the decoder reset asks for a key frame.
 
 1. No throttle, 60 s. Expected: no request after the start request.
 2. `sudo -n /usr/local/sbin/abr-shape on 30mbit`. Expected: within about 5 s a request with `reason loss` (or `delay`) to 33000 kbps or less; answer `APPLIED`; `no key frame after the in-place change`; no `Recreating` line. More requests can follow until the target is below about 30000 kbps.
@@ -4733,7 +4733,7 @@ Record each result (the log lines with time) for Step 7. "In place" means: answe
 5. `sudo -n /usr/local/sbin/abr-shape on 1000mbit`, then `sudo -n /usr/local/sbin/abr-shape netem loss 3%`, 60 s. Expected: decreases with `reason loss` or `FEC`. Record how low the target goes (spec R5: random loss also lowers the bitrate; the floor is 1500 kbps). Then `sudo -n /usr/local/sbin/abr-shape netem delay 40ms`, 60 s. Expected: one `reason delay` decrease at most, then the line `the RTT stays at ... ms after a decrease; this is now the RTT baseline`, then increases. Then `sudo -n /usr/local/sbin/abr-shape off`.
 6. Live resize: ask the user to make the stream window smaller and press `Ctrl+Alt+Shift+W`. Expected: `Video stream is now <w>x<h>`, `the limit for <w>x<h> is <kbps> kbps` with a lower value, a request with `reason new limit`. Make the window bigger, press the hotkey again: the limit and the target go up.
 7. Host cap (optional, needs the user in the Apollo web UI on `https://10.10.10.232:47990`): set "Maximum bitrate" to 20000, restart the stream. Expected: the start answer has `accepted 20000 kbps` and the limit is 20000. Set it back to 0 after the test.
-8. End the stream. In Settings uncheck "Adapt bitrate to the network" (or start with `--no-adaptive-bitrate`). Stream, use `abr-shape on 30mbit` for 30 s, then `abr-shape off`. Expected: `Adaptive bitrate: off (a live resize still sets the bitrate)` and no request; a live resize gives one `reason new limit` request. Check the box again.
+8. End the stream. In Settings uncheck "Adapt bitrate to the network" (or start with `--no-adaptive-bitrate`). Stream, use `abr-shape on 30mbit` for 30 s, then `abr-shape off`. Expected: a line that starts with `Adaptive bitrate: off`. With the default bitrate (`autoAdjustBitrate` on, the case of Step 3) the line is `Adaptive bitrate: off (a live resize still sets the bitrate), ...`, there is no request, and a live resize gives one `reason new limit` request. With a manual bitrate the line is `Adaptive bitrate: off, ...` and a live resize gives no request. The overlay shows the stream start bitrate with `(fixed)` until a request goes. Check the box again.
 9. Stock host (optional): stream to the Steam Machine (`10.10.11.27`, stock Sunshine). Expected: one line `the host does not support bitrate changes`.
 10. Second client (optional, needs a second device such as a phone with Artemis): both stream from CPLT-4A; throttle only the laptop. Expected: the laptop lowers its bitrate; the other client's bitrate does not change.
 11. Non-NVENC (optional, needs the user to set `encoder = software` in the web UI and restart the stream; set it back after the test): with `abr-shape on 30mbit`. Expected: answers `APPLIED_RESTART`, one key frame per change, decreases at least 3 s apart and increases at least 15 s apart.

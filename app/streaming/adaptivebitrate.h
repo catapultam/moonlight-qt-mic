@@ -94,7 +94,7 @@ enum class Reason {
     FecPressure,  // rule 3
     Increase,     // rule 5
     Ceiling,      // a new ceiling after a live resize (spec 4.6)
-    Resend,       // the same target again after a timeout or a failed change (spec 3.5, 4.5)
+    Resend,       // the same target again after a timeout, a failed change or a failed send (spec 3.5, 4.5, 6.2)
 };
 
 inline const char* reasonName(Reason reason)
@@ -444,6 +444,16 @@ public:
         }
         setTarget(decision.targetKbps);
         clearHistory(nowMs);
+    }
+
+    // The caller could not send the request of decision (spec 6.2). A target that the
+    // controller already holds (start, resend, new ceiling) goes again at the next free
+    // tick (reason resend). A rule decision did not change the target: the rules decide again.
+    void sendFailed(const Decision& decision)
+    {
+        if (running() && decision.send && decision.targetKbps == m_Target) {
+            m_Resend = true;
+        }
     }
 
     // A BITRATE_STATUS answer (spec 3.5 and 4.5)

@@ -581,6 +581,10 @@ void Session::applyStreamSize(int width, int height)
     m_StreamConfig.height = height;
     m_InputHandler->setStreamSize(width, height);
 
+    // The decoder reset below asks for a key frame: stop the key frame check (spike S1)
+    m_KeyFrameMarkRequestId = 0;
+    m_KeyFrameCheckRequestId = 0;
+
     // Adaptive bitrate: the target for the new size (spec 4.6, D13)
     updateBitrateCeiling();
 
@@ -624,13 +628,20 @@ void Session::startAdaptiveBitrate()
 
     uint32_t ceiling = calculateBitrateCeiling();
     m_BitrateController.start(ceiling, SDL_GetTicks64(), m_Preferences->adaptiveBitrate);
+    // D12: with adaptation off, only a live resize with the default bitrate sends a request
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Adaptive bitrate: %s, limit %u kbps, stream start %d kbps",
-                m_Preferences->adaptiveBitrate ? "on" : "off (a live resize still sets the bitrate)",
+                m_Preferences->adaptiveBitrate ? "on" :
+                    (m_Preferences->autoAdjustBitrate ? "off (a live resize still sets the bitrate)" : "off"),
                 ceiling, m_StreamConfig.bitrate);
     publishBitrateState();
 
     m_BitrateTickTimer = SDL_AddTimer(AdaptiveBitrate::TICK_MS, bitrateTickTimerCallback, nullptr);
+    if (m_BitrateTickTimer == 0) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "Adaptive bitrate: SDL_AddTimer() failed: %s; the bitrate does not change",
+                     SDL_GetError());
+    }
 }
 
 void Session::bitrateTick()
@@ -696,16 +707,28 @@ void Session::bitrateTick()
 void Session::sendBitrateRequest(const AdaptiveBitrate::Decision& decision)
 {
     uint32_t requestId;
+    uint64_t now = SDL_GetTicks64();
     if (LiSendBitrateRequest(decision.targetKbps, &requestId) != 0) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Adaptive bitrate: could not send the request for %u kbps", decision.targetKbps);
+        // The controller sends the target again later. One warning for each target, or each 5 s.
+        if (decision.targetKbps != m_BitrateSendFailKbps || now - m_BitrateSendFailLogMs >= 5000) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Adaptive bitrate: could not send the request for %u kbps", decision.targetKbps);
+            m_BitrateSendFailKbps = decision.targetKbps;
+            m_BitrateSendFailLogMs = now;
+        }
+        m_BitrateController.sendFailed(decision);
         return;
     }
-    m_BitrateController.sent(decision, requestId, SDL_GetTicks64());
+    m_BitrateController.sent(decision, requestId, now);
+    m_BitrateSendFailKbps = 0;
+    m_BitrateRequestSent = true;
 
-    // A key frame of an in-place change can arrive before the answer: count from here
-    m_KeyFrameMark = m_KeyFrameCount.load();
-    m_KeyFrameMarkRequestId = requestId;
+    // A key frame of an in-place change can arrive before the answer: count from here.
+    // Not for a new ceiling: the decoder reset of the live resize asks for a key frame.
+    if (decision.reason != AdaptiveBitrate::Reason::Ceiling) {
+        m_KeyFrameMark = m_KeyFrameCount.load();
+        m_KeyFrameMarkRequestId = requestId;
+    }
 
     char line[256];
     AdaptiveBitrate::formatDecision(decision, line, sizeof(line));
@@ -774,7 +797,9 @@ void Session::updateBitrateCeiling()
 
 void Session::publishBitrateState()
 {
-    m_BitrateTargetKbps = m_BitrateController.targetKbps();
+    // With adaptation off, the host runs the start bitrate until the first request.
+    // 0 makes formatBitrateStats() show m_StreamConfig.bitrate.
+    m_BitrateTargetKbps = (m_BitrateController.adaptive() || m_BitrateRequestSent) ? m_BitrateController.targetKbps() : 0;
     m_BitrateCeilingKbps = m_BitrateController.ceilingKbps();
     m_BitrateEncoderKbps = m_BitrateController.encoderKbps();
     m_BitrateRunning = m_BitrateController.running() && m_BitrateController.adaptive();
@@ -1131,7 +1156,10 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences *prefere
       m_KeyFrameMark(0),
       m_KeyFrameMarkRequestId(0),
       m_KeyFrameCheckMs(0),
-      m_KeyFrameCheckRequestId(0)
+      m_KeyFrameCheckRequestId(0),
+      m_BitrateSendFailKbps(0),
+      m_BitrateSendFailLogMs(0),
+      m_BitrateRequestSent(false)
 {
 }
 

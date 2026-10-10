@@ -816,7 +816,7 @@ void FFmpegVideoDecoder::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst)
     dst.renderedFps     = (double)dst.renderedFrames / timeDiffSecs;
 }
 
-void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, int length)
+void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, int length, bool includeBitrate)
 {
     int offset = 0;
     const char* codecString;
@@ -925,9 +925,10 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
             offset += ret;
 
-            // Adaptive bitrate line (spec 6.5), outside DISPLAY_BITRATE
+            // Adaptive bitrate line (spec 6.5), outside DISPLAY_BITRATE. It shows the
+            // current values, thus the stats log of a whole decoder does not include it.
             Session* session = Session::get();
-            if (session != nullptr) {
+            if (includeBitrate && session != nullptr) {
                 ret = session->formatBitrateStats(&output[offset], length - offset);
                 if (ret < 0 || ret >= length - offset) {
                     SDL_assert(false);
@@ -1005,7 +1006,7 @@ void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
 {
     if (stats.renderedFps > 0 || stats.renderedFrames != 0) {
         char videoStatsStr[1024];
-        stringifyVideoStats(stats, videoStatsStr, sizeof(videoStatsStr));
+        stringifyVideoStats(stats, videoStatsStr, sizeof(videoStatsStr), false);
 
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "\n%s\n------------------\n%s",
@@ -2210,7 +2211,8 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
 
             stringifyVideoStats(lastTwoWndStats,
                                 Session::get()->getOverlayManager().getOverlayText(Overlay::OverlayDebug),
-                                Session::get()->getOverlayManager().getOverlayMaxTextLength());
+                                Session::get()->getOverlayManager().getOverlayMaxTextLength(),
+                                true);
             Session::get()->getOverlayManager().setOverlayTextUpdated(Overlay::OverlayDebug);
         }
 

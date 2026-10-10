@@ -632,6 +632,55 @@ static void testTimeoutNotAdaptive()
     }
 }
 
+// Spec 6.2: a request that the session could not send
+static void testSendFailed()
+{
+    {
+        // A new ceiling: the controller holds the new target and sends it again after the settle time
+        Sim sim(40000);
+        sim.runStart();
+        Decision r = sim.c.setCeiling(20000, sim.s.nowMs);
+        assert(r.send && r.targetKbps == 20000);
+        sim.c.sendFailed(r);
+        assert(!sim.c.pending() && sim.c.targetKbps() == 20000);
+        Decision d;
+        assert(sim.stepUntilSend(d, 20) == 12);  // RESTART_SETTLE_MS
+        assert(d.reason == Reason::Resend && d.fromKbps == 20000 && d.targetKbps == 20000);
+        uint32_t id = sim.send(d);
+        assert(sim.answer(id, 20000) == StatusResult::Accepted);
+    }
+    {
+        // A rule decision: the target does not change and the rule decides again
+        Sim sim(40000);
+        sim.runStart();
+        Decision d;
+        assert(sim.stepUntilSend(d, 20, 1) > 0 && d.reason == Reason::Loss && d.targetKbps == 30000);
+        sim.c.sendFailed(d);
+        assert(sim.c.targetKbps() == 40000);
+        Decision again = sim.step(1);
+        assert(again.send && again.reason == Reason::Loss && again.targetKbps == 30000);
+    }
+    {
+        // The start request: sent again at the next tick
+        Sim sim(40000);
+        Decision d;
+        assert(sim.stepUntilSend(d, 40) > 0 && d.reason == Reason::Start);
+        sim.c.sendFailed(d);
+        Decision again = sim.step();
+        assert(again.send && again.targetKbps == 40000);
+    }
+    {
+        // A stopped controller does nothing
+        Sim sim(40000);
+        Decision d;
+        assert(sim.stepUntilSend(d, 40) > 0);
+        uint32_t id = sim.send(d);
+        assert(sim.answer(id, 40000, StatusNotSupported) == StatusResult::Stopped);
+        sim.c.sendFailed(d);
+        assert(!sim.step().send);
+    }
+}
+
 // Spec 4.5: an unknown status code stops the controller
 static void testUnknownStatus()
 {
@@ -740,6 +789,7 @@ int main()
     testTimeoutResend();
     testLateAnswer();
     testTimeoutNotAdaptive();
+    testSendFailed();
     testUnknownStatus();
     testRttZero();
     testNotAdaptive();

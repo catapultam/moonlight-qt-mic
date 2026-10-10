@@ -405,6 +405,11 @@ private:
     uint32_t m_KeyFrameMarkRequestId;
     uint64_t m_KeyFrameCheckMs;
     uint32_t m_KeyFrameCheckRequestId;
+    // Rate limit of the send failure warning
+    uint32_t m_BitrateSendFailKbps;
+    uint64_t m_BitrateSendFailLogMs;
+    // True after the first request that was sent (overlay with adaptation off)
+    bool m_BitrateRequestSent;
     // Answers from clBitrateStatus() (async callback thread) for the main thread. A vector
     // and not a heap object per SDL event: events left in the queue at the end would leak.
     struct BitrateStatusMessage {

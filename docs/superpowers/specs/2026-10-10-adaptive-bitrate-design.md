@@ -785,7 +785,8 @@ New `Session::calculateBitrateCeiling()`:
   rule covers the host that has no YUV444 (the start-time swap at
   `session.cpp:1972-1988`).
 - `autoAdjustBitrate` off: `m_Preferences->bitrateKbps` (D11).
-- Then clamp to the ceiling that the host sent (`accepted_kbps`, section 4.5).
+- `Controller::setCeiling()` and `onStatus()` clamp to the ceiling that the host
+  sent (`accepted_kbps`, section 4.5).
 
 The value is the configured bitrate (D3). The client does not apply the 0.8
 factor of `SdpGenerator.c:349`. The host makes all reductions.
@@ -796,18 +797,27 @@ the current target.
 ### 6.2 Threads and timers
 
 - The controller runs on the main thread, in the event loop of
-  `Session::execInternal`. That loop ends before `LiStopConnection()`
-  (`session.cpp:1568-1574`), so every send is between `LiStartConnection` and
-  `LiStopConnection`.
+  `Session::exec`. That loop ends before `LiStopConnection()` in
+  `DeferredSessionCleanupTask`, so every send is between `LiStartConnection`
+  and `LiStopConnection`.
 - Tick timer: `SDL_AddTimer(250, ...)` pushes `SDL_CODE_BITRATE_TICK`. Start
   it at the first decoded frame of the session only (section 4.4). Remove it
-  when the event loop ends.
+  when the event loop ends, before `DeferredSessionCleanupTask` calls
+  `LiStopConnection()`. Log an error when `SDL_AddTimer()` fails.
 - Request timeout: the controller checks `REQUEST_TIMEOUT_MS` in its tick. No
   extra timer.
 - `clBitrateStatus` (new static callback, last entry of `k_ConnCallbacks`,
-  `session.cpp:63-77`) runs on the async callback thread. It pushes
-  `SDL_CODE_BITRATE_STATUS` with the fields in a heap struct (`data1`). The
-  main thread calls `Controller::onStatus()` and frees the struct.
+  `session.cpp:63-77`) runs on the async callback thread. It puts the fields
+  in a session queue under a mutex and pushes `SDL_CODE_BITRATE_STATUS` with
+  no data. The main thread empties the queue and calls
+  `Controller::onStatus()` for each entry. (A heap struct in the event would
+  leak when the event stays in the SDL queue at the end of the session.)
+- Send failure: when `LiSendBitrateRequest()` fails, the session calls
+  `Controller::sendFailed()`. A target that the controller already holds (the
+  start request, a resend, a new ceiling after a live resize) goes again on
+  the next free tick (rule 1) with reason `resend`. A rule decision (rules 2,
+  3 and 5) did not change the target, so the rules decide again on the next
+  tick. The client logs the failure once for each target, or once each 5 s.
 - New SDL user event codes: take a block from 120 (`SDL_CODE_BITRATE_TICK`
   120, `SDL_CODE_BITRATE_STATUS` 121). 100 to 111 are in use
   (`session.cpp:26-36`, `decoder.h:7-15`). Take the next free numbers at
@@ -857,7 +867,10 @@ Bitrate: target 42.0 Mbps (limit 80.0), host encoder 33.4 Mbps, measured 31.2 Mb
 The session publishes the values with `std::atomic<uint32_t>` members (target,
 ceiling, encoder kbps). The measured value comes from the session
 `BandwidthTracker` (thread safe, `bandwidth.h:20-21`). When the controller
-does not run, the line shows "fixed" after the target.
+does not run, the line shows "fixed" after the target. With adaptation off,
+the target is `m_StreamConfig.bitrate` until the first request goes (the host
+runs the start bitrate until then). The line shows current values, so the
+"Global video stats" log of a decoder does not include it.
 
 ### 6.6 Poor connection overlay
 

@@ -52,7 +52,8 @@ private:
                                 TestMode testMode,
                                 bool useAlternateFrontend);
 
-    void stringifyVideoStats(VIDEO_STATS& stats, char* output, int length);
+    // includeBitrate: add the current adaptive bitrate line (overlay only)
+    void stringifyVideoStats(VIDEO_STATS& stats, char* output, int length, bool includeBitrate);
 
     void logVideoStats(VIDEO_STATS& stats, const char* title);
 
