@@ -184,8 +184,9 @@ inline int formatOverlay(bool running, uint32_t targetKbps, uint32_t ceilingKbps
 class Controller {
 public:
     // Starts the controller at the first decoded frame of the session. A second
-    // call does nothing (spec 4.4). adaptive == false: no rule runs, and only
-    // setCeiling() makes requests (spec D12).
+    // call does nothing (spec 4.4). adaptive == false: no rule runs. Only setCeiling(),
+    // a resend after a timeout and a resend of the ceiling after ENCODER_FAILED
+    // make requests (spec D12).
     void start(uint32_t ceilingKbps, uint64_t nowMs, bool adaptive)
     {
         if (m_Started) {

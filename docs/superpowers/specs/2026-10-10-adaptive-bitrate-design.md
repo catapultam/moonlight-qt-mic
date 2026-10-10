@@ -249,8 +249,10 @@ Methods: `start(ceilingKbps, nowMs, adaptive)`, `tick(const Sample&)`,
 `sent(decision, requestId, nowMs)`, `setCeiling(kbps, nowMs)` (live resize
 or clamp), `onStatus(requestId, status, requestedKbps, acceptedKbps,
 encoderKbps, nowMs)`, `notifySettle(nowMs, durationMs)`. `adaptive == false`
-(D12): no rule runs, and only `setCeiling()` and a resend after a timeout
-make requests. There is no `onTimeout()`: `tick()` finds the timeout and
+(D12): no rule runs. Only `setCeiling()`, a resend after a timeout and a resend
+of the ceiling after `ENCODER_FAILED` make requests. A host that never
+answers gets one resend each 3.25 s, with one request in flight; a resend of
+the same value gets `UNCHANGED` and does not restart the encoder. There is no `onTimeout()`: `tick()` finds the timeout and
 reports it in `Decision::timedOut` (section 6.2).
 
 The controller works with deltas of the cumulative counters. It keeps the
