@@ -330,7 +330,7 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `INC_STEP_NEAR_PCT` | 3 | Increase step near the last failure rate |
 | `STABLE_MS` | 4000 | Clean time before an increase |
 | `NEAR_FAILURE_PCT` | 85 | "Near" means the target is >= 85 % of the last failure rate (memory of 60 s) |
-| `APP_LIMITED_PCT` | 40 | Increase only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %. The end-to-end test with full motion measured only 63-75 % of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
+| `APP_LIMITED_PCT` | 40 | Increase (rule 5), and decrease on delay or FEC pressure (rule 3), only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %: in the end-to-end test a static desktop measured 0.1-1.3 Mbps with `encoder_kbps` at 30-50 Mbps (below 3 %). The end-to-end test with full motion measured only 63-75 % of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
 | `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
 | `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
 | `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
@@ -360,8 +360,11 @@ Rules, in order, at each tick:
    ratio is always known. This cut can be larger than `DEC_LOSS` when
    the network carries much less than the target.
 3. Sustained delay or FEC pressure: the RTT shows delay in the last two 1 s
-   windows, or FEC pressure in the 2 s window. Then
-   `new = max(FLOOR, target * DEC_DELAY)`. Store `lastFailureKbps`.
+   windows, or FEC pressure in the 2 s window, and the measured bitrate is at
+   least `APP_LIMITED_PCT` (40 %) of `encoder_kbps` (the same test as rule
+   5). Then `new = max(FLOOR, target * DEC_DELAY)`. Store `lastFailureKbps`.
+   If the stream is app-limited, these signals give no change, and rules 4
+   and 5 do not run on this tick.
 4. An isolated burst (one lossy window or one delay window, and no rule 2 or
    3): no change (D8). Log it at debug level.
 5. Increase: the target is below the ceiling, no lossy window, no delay and
@@ -383,7 +386,16 @@ App-limited guard (rule 5): with CBR and filler data off
 (`insert_filler_data = false`, `src/nvenc/nvenc_config.h:50`), a static
 picture uses much less than the target. No loss then proves nothing about the
 network. Thus a desktop with no motion stays at its current target. It does
-not climb. A decrease does not need the guard.
+not climb.
+App-limited guard (rule 3): a decrease on delay or FEC pressure also needs
+the guard. A lower bitrate cannot fix delay or FEC pressure that the stream
+does not cause. In the end-to-end test, a static desktop (measured 0.1-1.3
+Mbps, `encoder_kbps` 30-50 Mbps) on a clean network had RTT samples of
+17-58 ms against a baseline of 1 ms. Rule 3 fired again and again, and FEC
+pressure from random loss also cut. The target fell from 64 to 10 Mbps in 2
+minutes. The next motion then started low and climbed for about 2 minutes.
+The loss rule (rule 2) does not use the guard: loss is a stronger signal,
+and the cut is limited by `MAX_CUT` and the measured bitrate.
 Trade-off of 40 %: content at a constant rate R can probe up until the
 encoder value is about 2.5 R (with 70 % it was 1.43 R), up to the ceiling.
 The next full-motion scene can then go above what the network carries, and
@@ -942,8 +954,11 @@ with a fake clock:
 4. Isolated burst (one window with 12 % loss and an RTT spike, as in the
    Wi-Fi stall): no change.
 5. Heavy loss with RTT rise in one window: a decrease.
-6. Delay only (RTT baseline + 20 ms for 2 s): decrease to 90 %.
-7. FEC pressure only: decrease to 90 %.
+6. Delay only (RTT baseline + 20 ms for 2 s): decrease to 90 %. Also at
+   measured 60 % of the host encoder value. At measured 10 % (app-limited):
+   no change.
+7. FEC pressure only: decrease to 90 %. At measured 10 % (app-limited): no
+   change. Sustained loss at measured 10 %: a decrease.
 8. Recovery: after `STABLE_MS` with no loss and measured >= 40 %: increase
    by 8 %; near `lastFailureKbps`: increase by 3 %.
 9. App-limited: no loss, measured 20 % of the host encoder value: no
@@ -1042,7 +1057,7 @@ Steps:
 | R4 | The controller oscillates between two values. | Dead band, minimum intervals, smaller steps near `lastFailureKbps`, settle times. Unit test 8.1 and manual steps 2 to 4. Log every decision. |
 | R5 | The controller lowers the bitrate on Wi-Fi stalls that a lower bitrate does not fix. | D8. Manual test at the remote site of the memory note, or `netem` with bursts. |
 | R6 | An IDR frame after a restart or a resize looks like congestion (burst of packets, short loss). | Settle times (4.3). Unit test 2. |
-| R7 | The app-limited guard keeps a static desktop at a low target after congestion ends. The next motion then has a low bitrate until the controller climbs. | Accepted. The climb is 8 % each 4 s. If too slow: allow a jump to the last good target when the measured bitrate reaches it. With the 40 % guard, light constant motion can also probe up to about 2.5 times its rate (4.3). |
+| R7 | The app-limited guard keeps a static desktop at a low target after congestion ends. The next motion then has a low bitrate until the controller climbs. | Accepted. The climb is 8 % each 4 s. If too slow: allow a jump to the last good target when the measured bitrate reaches it. Rule 3 uses the guard, so delay and FEC pressure on a static desktop do not lower the target (the end-to-end test fell from 64 to 10 Mbps in 2 minutes without it, 4.3). The loss rule can still lower it. With the 40 % guard, light constant motion can also probe up to about 2.5 times its rate (4.3). |
 | R8 | ENet RTT is smoothed and only updates on ACKs, so the delay signal lags. | The ping goes each 100 ms. The loss rules do not need RTT. Check the lag in S2. |
 | R9 | `encode_run` with `config_t &` changes the config of `capture_async` in a place that the live resize code does not expect. | The only field that `encode_run` writes is `bitrate`. The resize revert keeps it (5.4). Host review checks every `config` write. |
 | R10 | Restart path: two restarts close together (resize, then bitrate) cost two IDR frames. | Accepted for non-NVENC (4.6). The host 2 s restart interval limits the rate. |

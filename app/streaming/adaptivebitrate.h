@@ -60,10 +60,12 @@ constexpr uint32_t INC_STEP_NEAR_PCT = 3;
 constexpr uint32_t STABLE_MS = 4000;
 constexpr uint32_t NEAR_FAILURE_PCT = 85;
 constexpr uint32_t FAILURE_MEMORY_MS = 60000;
-// Rule 5: increase only when measured >= this % of the host encoder value. A static
-// picture measures far below 40 %. With full motion the end-to-end test measured only
-// 63-75 % (the host sends fewer frames than the frame rate; the CBR encoder undershoots),
-// so a higher value blocks the increase after the network recovers.
+// Rules 3 and 5: an increase, and a decrease on delay or FEC pressure, need measured >=
+// this % of the host encoder value. A static picture measures far below 40 %: in the
+// end-to-end test a static desktop measured 0.1-1.3 Mbps (below 3 % of the encoder value).
+// With full motion the end-to-end test measured only 63-75 % (the host sends fewer frames
+// than the frame rate; the CBR encoder undershoots), so a higher value blocks the
+// increase after the network recovers.
 constexpr uint32_t APP_LIMITED_PCT = 40;
 constexpr uint32_t DEAD_BAND_PCT = 3;
 constexpr uint32_t DEAD_BAND_MIN_KBPS = 250;       // also the smallest increase step (plan)
@@ -326,6 +328,10 @@ public:
         }
 
         const uint32_t floor = floorKbps();
+        // The stream uses only a small part of the encoder value (a static picture). A lower
+        // bitrate cannot fix delay or FEC pressure that this stream does not cause.
+        const bool notAppLimited = m_EncoderKbps > 0 &&
+                sample.measuredMbps * 1000.0 * 100 >= (double)APP_LIMITED_PCT * m_EncoderKbps;
         const bool sustainedLoss = (lossyWindows >= 2 && lossyTicks >= LOSS_MIN_TICKS) || (w[0].heavy && w[0].delay);
         const bool sustainedDelay = w[0].delay && w[1].delay;
         uint32_t newKbps = m_Target;
@@ -347,7 +353,7 @@ public:
             reason = Reason::Loss;
             noteFailure(now);
         }
-        else if (sustainedDelay || fecPressure) {
+        else if ((sustainedDelay || fecPressure) && notAppLimited) {
             // Rule 3. A second delay decision while the RTT did not fall after the last
             // delay decrease: the added delay is not a queue that a lower bitrate drains.
             if (sustainedDelay && !fecPressure && m_HaveDelayCut && now - m_LastDelayCutMs < RTT_BASELINE_MS &&
@@ -363,6 +369,10 @@ public:
             reason = sustainedDelay ? Reason::Delay : Reason::FecPressure;
             noteFailure(now);
         }
+        else if (sustainedDelay || fecPressure) {
+            // Rule 3 with an app-limited stream: no change. This is not an isolated burst.
+            return d;
+        }
         else if (lossyWindows > 0 || w[0].delay) {
             // Rule 4 (D8)
             d.isolated = true;
@@ -372,8 +382,6 @@ public:
             // Rule 5
             const uint64_t cleanSince = m_LastBadMs > m_CleanSinceMs ? m_LastBadMs : m_CleanSinceMs;
             const bool stable = now - cleanSince >= STABLE_MS;
-            const bool notAppLimited = m_EncoderKbps > 0 &&
-                    sample.measuredMbps * 1000.0 * 100 >= (double)APP_LIMITED_PCT * m_EncoderKbps;
             if (m_Target < m_Ceiling && stable && notAppLimited) {
                 const bool nearFailure = m_HaveFailure && now - m_LastFailureMs < FAILURE_MEMORY_MS &&
                         (uint64_t)m_Target * 100 >= (uint64_t)NEAR_FAILURE_PCT * m_LastFailureKbps;

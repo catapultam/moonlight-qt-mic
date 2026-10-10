@@ -213,6 +213,64 @@ static void testFecPressure()
     assert(d.fecPct > 3.9 && d.fecPct < 4.1);
 }
 
+// A static picture (measured 10 % of the encoder value) with sustained delay: no
+// decrease. The end-to-end test cut 64 -> 10 Mbps on a static desktop on RTT spikes.
+static void testStaticStreamDelayNoDecrease()
+{
+    Sim sim(40000);
+    sim.runStart();
+    sim.s.measuredMbps = 32.0 * 0.10;  // encoder 32000
+    for (int i = 0; i < 8; i++) {
+        assert(!sim.step().send);
+    }
+    Decision d;
+    for (int i = 0; i < 40; i++) {
+        d = sim.step(0, 35);
+        assert(!d.send && !d.rebased);
+    }
+    assert(!d.isolated);  // sustained delay is not an isolated burst (rule 4)
+    assert(sim.c.targetKbps() == 40000);
+}
+
+// A busy stream (measured 60 % of the encoder value) with sustained delay: a decrease
+static void testBusyStreamDelayDecreases()
+{
+    Sim sim(40000);
+    sim.runStart();
+    sim.s.measuredMbps = 32.0 * 0.60;
+    for (int i = 0; i < 8; i++) {
+        assert(!sim.step().send);
+    }
+    Decision d;
+    assert(sim.stepUntilSend(d, 12, 0, 35) == 7);
+    assert(d.reason == Reason::Delay && d.targetKbps == 36000);
+}
+
+// A static picture with FEC pressure: no decrease
+static void testStaticStreamFecNoDecrease()
+{
+    Sim sim(40000);
+    sim.runStart();
+    sim.s.measuredMbps = 32.0 * 0.10;
+    Decision d;
+    for (int i = 0; i < 40; i++) {
+        d = sim.step(0, 10, 4);
+        assert(!d.send && !d.isolated);
+    }
+    assert(sim.c.targetKbps() == 40000);
+}
+
+// A static picture with sustained loss: the loss rule still decreases
+static void testStaticStreamLossDecreases()
+{
+    Sim sim(40000);
+    sim.runStart();
+    sim.s.measuredMbps = 32.0 * 0.10;
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 1) == 8);
+    assert(d.reason == Reason::Loss && d.targetKbps == 20000);  // MAX_CUT
+}
+
 // Spec 8.1 test 8
 static void testRecovery()
 {
@@ -812,6 +870,10 @@ int main()
     testHeavyLossWithRttRise();
     testDelay();
     testFecPressure();
+    testStaticStreamDelayNoDecrease();
+    testBusyStreamDelayDecreases();
+    testStaticStreamFecNoDecrease();
+    testStaticStreamLossDecreases();
     testRecovery();
     testAppLimited();
     testBusyStreamIncreases();
