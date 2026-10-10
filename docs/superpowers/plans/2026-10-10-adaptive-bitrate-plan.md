@@ -610,10 +610,10 @@ After Task 11, ask the user if the release `spike-s1-nvenc-reconfigure` can be d
 
 #### S1 result
 
-- RTX 5070 (Linux): outcome A in the planning run (2026-10-09, driver 615.71.09, NVENC API 13.1). Step 2 result: `<A|B|C>`.
-- RTX 4090 (Windows): outcome `<A|B|C>`, `<GPU and API line>`.
-- Failed lines: `<none, or the RESULT lines with FAIL>`.
-- Decision for Task 4 Step 5: `<A|B|C>`.
+- RTX 5070 (Linux): outcome A in the planning run (2026-10-09, driver 615.71.09, NVENC API 13.1). Step 2 result: laptop: outcome A (2026-10-10, `GPU NVIDIA GeForce RTX 5070 Laptop GPU, driver NVENC API 13.1`). 24 RESULT lines, 0 FAIL, all `idr_frames=0`, all reconfigure OK. avg+vbv ratios 0.87 to 1.06. Mode avg 10000->60000: INFO, ratio 0.68 (H.264), 0.67 (HEVC), 1.04 (AV1).
+- RTX 4090 (Windows, CPLT-4A, 2026-10-10, run by Armor-Console): outcome A, `GPU NVIDIA GeForce RTX 4090, driver NVENC API 13.1`. 24 RESULT lines, all reconfigure OK, all `idr_frames=0`. All 12 avg+vbv lines PASS (ratios 0.88 to 1.08). Runtime 31 s.
+- Failed lines: one, in mode avg (not used): `RESULT codec=AV1 mode=avg change=60000->20000 kbps reconfigure=OK idr_frames=0 mean_kB=33.4 reference_kB=42.5 target_kB=41.7 ratio=0.79 FAIL`. Mode avg 10000->60000: INFO (0.67 H.264, 0.69 HEVC, 1.05 AV1).
+- Decision for Task 4 Step 5: A (change averageBitRate, maxBitRate and vbvBufferSize in place with nvEncReconfigureEncoder, resetEncoder=0, forceIDR=0).
 
 ---
 ### Task 3: Host: wire format, bitrate chain and request state (pure header)
