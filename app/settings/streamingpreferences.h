@@ -135,6 +135,15 @@ public:
     };
     Q_ENUM(MouseMode);
 
+    // How fast the adaptive bitrate reacts (adaptive bitrate spec section 11)
+    enum AdaptiveBitrateSpeed
+    {
+        ABS_SLOW,
+        ABS_NORMAL,
+        ABS_FAST,
+    };
+    Q_ENUM(AdaptiveBitrateSpeed);
+
     Q_PROPERTY(int width MEMBER width NOTIFY displayModeChanged)
     Q_PROPERTY(int height MEMBER height NOTIFY displayModeChanged)
     Q_PROPERTY(int fps MEMBER fps NOTIFY displayModeChanged)
@@ -142,6 +151,7 @@ public:
     Q_PROPERTY(bool unlockBitrate MEMBER unlockBitrate NOTIFY unlockBitrateChanged)
     Q_PROPERTY(bool autoAdjustBitrate MEMBER autoAdjustBitrate NOTIFY autoAdjustBitrateChanged)
     Q_PROPERTY(bool adaptiveBitrate MEMBER adaptiveBitrate NOTIFY adaptiveBitrateChanged)
+    Q_PROPERTY(AdaptiveBitrateSpeed adaptiveBitrateSpeed MEMBER adaptiveBitrateSpeed NOTIFY adaptiveBitrateSpeedChanged)
     Q_PROPERTY(bool enableVsync MEMBER enableVsync NOTIFY enableVsyncChanged)
     Q_PROPERTY(bool gameOptimizations MEMBER gameOptimizations NOTIFY gameOptimizationsChanged)
     Q_PROPERTY(bool playAudioOnHost MEMBER playAudioOnHost NOTIFY playAudioOnHostChanged)
@@ -203,6 +213,7 @@ public:
     // Lower the bitrate on network congestion and raise it again up to the
     // target (adaptive bitrate spec D12). Not the same as autoAdjustBitrate.
     bool adaptiveBitrate;
+    AdaptiveBitrateSpeed adaptiveBitrateSpeed;
     bool enableVsync;
     bool gameOptimizations;
     bool playAudioOnHost;
@@ -247,6 +258,7 @@ signals:
     void unlockBitrateChanged();
     void autoAdjustBitrateChanged();
     void adaptiveBitrateChanged();
+    void adaptiveBitrateSpeedChanged();
     void enableVsyncChanged();
     void gameOptimizationsChanged();
     void playAudioOnHostChanged();

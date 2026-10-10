@@ -72,6 +72,7 @@ private:
     QMap<QString, StreamingPreferences::VideoCodecConfig> m_VideoCodecMap;
     QMap<QString, StreamingPreferences::VideoDecoderSelection> m_VideoDecoderMap;
     QMap<QString, StreamingPreferences::CaptureSysKeysMode> m_CaptureSysKeysModeMap;
+    QMap<QString, StreamingPreferences::AdaptiveBitrateSpeed> m_AdaptiveBitrateSpeedMap;
 };
 
 class ListCommandLineParser

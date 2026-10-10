@@ -309,7 +309,9 @@ Tick: every 250 ms. The session starts an `SDL_AddTimer` that pushes
 
 Windows: "1 s window" means the sum of the last 4 deltas.
 
-Values (constants in `adaptivebitrate.h`; tests use the same names):
+Values (constants in `adaptivebitrate.h`; tests use the same names). A value
+marked "(speed)" is the Normal value of the speed setting; section 11 gives
+the Slow and Fast values.
 
 | Name | Value | Meaning |
 |------|-------|---------|
@@ -320,24 +322,26 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `FLOOR_KBPS` | `min(1500, ceiling)` | Lowest target. An absolute value: the network capacity does not depend on the stream size, so (b) wins over (a). |
 | `LOSS_WINDOW_PCT` | 2 | A 1 s window with frame loss >= 2 % is "lossy" |
 | `LOSS_HEAVY_PCT` | 10 | Heavy loss |
-| `FEC_RECOVERED_PCT` | 3 | FEC recovered packets / video packets over 2 s >= 3 % is "FEC pressure" |
+| `FEC_RECOVERED_PCT` | 3 (speed) | FEC recovered packets / video packets over 2 s >= 3 % is "FEC pressure" |
 | `RTT_RISE_MIN_MS` | 15 | An RTT sample above `baseline + max(RTT_RISE_MIN_MS, baseline / 2)` is "delayed" |
 | `RTT_DELAY_SAMPLES` | 3 | A 1 s window shows "delay" when this many of its 4 RTT samples are delayed |
 | `RTT_BASELINE_MS` | 30000 | The baseline is the lowest RTT in the last 30 s |
 | `DEC_LOSS` | 0.75 | Multiplier on sustained loss |
 | `DEC_DELAY` | 0.90 | Multiplier on sustained delay or FEC pressure |
-| `INC_STEP_PCT` | 8 | Increase step, percent of the current target |
-| `INC_STEP_NEAR_PCT` | 3 | Increase step near the last failure rate |
-| `STABLE_MS` | 4000 | Clean time before an increase |
+| `INC_STEP_PCT` | 8 (speed) | Increase step, percent of the current target |
+| `INC_STEP_NEAR_PCT` | 3 (speed) | Increase step near the last failure rate |
+| `STABLE_MS` | 4000 (speed) | Clean time before an increase |
 | `NEAR_FAILURE_PCT` | 85 | "Near" means the target is >= 85 % of the last failure rate (memory of 60 s) |
 | `APP_LIMITED_PCT` | 40 | Increase (rule 5), and decrease on delay or FEC pressure (rule 3), only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %: in the end-to-end test a static desktop measured 0.1-1.3 Mbps with `encoder_kbps` at 30-50 Mbps (below 3 %). The end-to-end test with full motion measured only 63-75 % of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
 | `APP_LIMITED_HOLD_MS` | 5000 | Rule 3: for this time after a bad period starts, the app-limited test uses the larger of the measured bitrate and the measured bitrate of the last clean tick. A settle time removes the stored value (4.3). |
 | `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
-| `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
-| `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
+| `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000 (speed), 3000 | Between two decreases (in place, restart mode) |
+| `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000 (speed), 15000 | Between two increases (in place, restart mode) |
 | `REQUEST_TIMEOUT_MS` | 3000 | Pending request timeout |
 | `LOSS_MIN_FRAMES` | 10 | A 1 s window with fewer frames gives no loss signal |
-| `LOSS_MIN_TICKS` | 3 | Sustained loss also needs this many ticks with loss in the 3 s history |
+| `LOSS_MIN_TICKS` | 3 (speed) | Sustained loss also needs this many ticks with loss in the 3 s history |
+| `LOSS_WINDOWS` | 2 (speed) | Sustained loss needs this many lossy windows of the last three |
+| `DELAY_WINDOWS` | 2 (speed) | Sustained delay needs delay in this many newest windows |
 | `FEC_MIN_PACKETS` | 200 | A 2 s window with fewer video packets gives no FEC signal |
 | `MEASURED_MARGIN` | 0.9 | Rule 2: measured bitrate x 0.9 |
 | `MAX_CUT` | 0.5 | One decrease keeps at least half of the target |
@@ -350,7 +354,7 @@ Rules, in order, at each tick:
    deltas of this time are not a network signal). Return no decision. On the
    first free tick, a resend (sections 3.5 and 4.5) comes before the other
    rules.
-2. Sustained loss: two of the last three 1 s windows are lossy and at least
+2. Sustained loss: `LOSS_WINDOWS` (2) of the last three 1 s windows are lossy and at least
    `LOSS_MIN_TICKS` ticks of the 3 s history have loss, or the newest window
    has heavy loss and the RTT shows delay in the same window. Then
    `new = max(FLOOR, min(target * DEC_LOSS, measuredEncoderEquivalent * 0.9))`.
@@ -360,8 +364,8 @@ Rules, in order, at each tick:
    first request (section 4.4) gets a status before any decision, so this
    ratio is always known. This cut can be larger than `DEC_LOSS` when
    the network carries much less than the target.
-3. Sustained delay or FEC pressure: the RTT shows delay in the last two 1 s
-   windows, or FEC pressure in the 2 s window, and the measured bitrate is at
+3. Sustained delay or FEC pressure: the RTT shows delay in the last
+   `DELAY_WINDOWS` (2) 1 s windows, or FEC pressure in the 2 s window, and the measured bitrate is at
    least `APP_LIMITED_PCT` (40 %) of `encoder_kbps` (the same test as rule
    5). For the first `APP_LIMITED_HOLD_MS` after a bad period starts, this
    test uses the larger of the measured bitrate and the measured bitrate of
@@ -918,6 +922,20 @@ the current target.
   manual ceiling (D11). A display or fps option without `--bitrate` sets the
   default bitrate for the stream size and `autoAdjustBitrate = true`. The
   command line stream path does not save these values.
+- Speed setting (section 11): `StreamingPreferences` enum
+  `AdaptiveBitrateSpeed` (`ABS_SLOW`, `ABS_NORMAL`, `ABS_FAST`), property
+  `adaptiveBitrateSpeed`, key `adaptivebitratespeed`, default `ABS_NORMAL`.
+  `SettingsView.qml`: a label "Bitrate adaptation speed" and a combo box
+  (Slow, Normal, Fast) under the "Adapt bitrate to the network" check box.
+  The combo box is enabled only when the check box is checked; it keeps its
+  value when the check box is cleared. Tool tip: "Slow reacts less to short
+  changes in the network." and "Fast gets back to the full bitrate sooner
+  after a drop, but the bitrate drops more often near the limit of the
+  network." Command line: `--abr-speed slow|normal|fast`
+  (`parser.addChoiceOption("abr-speed", ...)`). The session gives the speed
+  to `Controller::start()` and adds `, speed <slow|normal|fast>` to the
+  end of the start log line (`Adaptive bitrate: on, limit <kbps> kbps,
+  stream start <kbps> kbps, speed normal`).
 - The line numbers in this section are from before the change.
 
 ### 6.5 Stats overlay
@@ -1102,7 +1120,7 @@ Steps:
 | R4 | The controller oscillates between two values. | Dead band, minimum intervals, smaller steps near `lastFailureKbps`, settle times. Unit test 8.1 and manual steps 2 to 4. Log every decision. |
 | R5 | The controller lowers the bitrate on Wi-Fi stalls that a lower bitrate does not fix. | D8. Manual test at the remote site of the memory note, or `netem` with bursts. Accepted: constant random loss of about 3 % gives constant FEC pressure, and rule 3 lowers a busy stream step by step. Random loss lowers the bitrate by design. In the end-to-end test (run 2, 00:04:55-00:05:30) the target fell from 64 to 23 Mbps in 35 s with FEC 3.0-3.2 %, RTT 1 ms and no frame loss. |
 | R6 | An IDR frame after a restart or a resize looks like congestion (burst of packets, short loss). | Settle times (4.3). Unit test 2. |
-| R7 | The app-limited guard keeps a static desktop at a low target after congestion ends. The next motion then has a low bitrate until the controller climbs. | Accepted. The climb is 8 % each 4 s. If too slow: allow a jump to the last good target when the measured bitrate reaches it. Rule 3 uses the guard, so delay and FEC pressure on a static desktop do not lower the target (the end-to-end test fell from 64 to 10 Mbps in 2 minutes without it, 4.3). The loss rule can still lower it. With the 40 % guard, light constant motion can also probe up to about 2.5 times its rate (4.3). |
+| R7 | The app-limited guard keeps a static desktop at a low target after congestion ends. The next motion then has a low bitrate until the controller climbs. | Accepted. The climb is 8 % each 4 s (Normal speed; section 11). If too slow: allow a jump to the last good target when the measured bitrate reaches it. Rule 3 uses the guard, so delay and FEC pressure on a static desktop do not lower the target (the end-to-end test fell from 64 to 10 Mbps in 2 minutes without it, 4.3). The loss rule can still lower it. With the 40 % guard, light constant motion can also probe up to about 2.5 times its rate (4.3). |
 | R8 | ENet RTT is smoothed and only updates on ACKs, so the delay signal lags. | The ping goes each 100 ms. The loss rules do not need RTT. Check the lag in S2. |
 | R9 | `encode_run` with `config_t &` changes the config of `capture_async` in a place that the live resize code does not expect. | The only field that `encode_run` writes is `bitrate`. The resize revert keeps it (5.4). Host review checks every `config` write. |
 | R10 | Restart path: two restarts close together (resize, then bitrate) cost two IDR frames. | Accepted for non-NVENC (4.6). The host 2 s restart interval limits the rate. |
@@ -1153,3 +1171,55 @@ Later changes from the end-to-end test (Task 11):
   !restart_mode`, spec 5.3 step 2). After the first restart, the host
   releases once `RESTART_INTERVAL` has passed since the last restart, even
   with a change still in flight.
+
+Later change: the speed setting (section 11).
+
+- A new setting (Slow, Normal, Fast) changes the increase steps, the
+  increase interval, the clean time, the window counts for a cut, the FEC
+  level and the decrease interval. Normal keeps the values of this spec.
+- `Controller::start()` has a fourth argument, the speed.
+- New constants `LOSS_WINDOWS` and `DELAY_WINDOWS` (2) replace the fixed
+  counts of rules 2 and 3.
+
+## 11. Adaptation speed setting
+
+Intent: the setting tunes how fast the controller reacts, both down and up.
+A slower setting reacts less to short network changes. A faster setting gets
+back to the full bitrate sooner after a drop, but drops more often near the
+limit of the network. Normal is the behavior of section 4.3.
+
+`adaptivebitrate.h` has `enum class Speed`, `struct Tuning` and
+`tuningFor(Speed)`. The Normal values are the constants of section 4.3.
+
+| Value | Slow | Normal | Fast |
+|-------|------|--------|------|
+| Increase step (`INC_STEP_PCT`) | 4 % | 8 % | 15 % |
+| Increase step near the last failure (`INC_STEP_NEAR_PCT`) | 2 % | 3 % | 5 % |
+| Time between increases (`MIN_INC_INTERVAL_MS`) | 8 s | 4 s | 2 s |
+| Clean time before an increase (`STABLE_MS`) | 8 s | 4 s | 2 s |
+| Lossy windows for a loss cut (`LOSS_WINDOWS`) | 3 | 2 | 2 |
+| Ticks with loss for a loss cut (`LOSS_MIN_TICKS`) | 3 | 3 | 2 |
+| Delay windows for a delay cut (`DELAY_WINDOWS`) | 3 | 2 | 2 |
+| FEC recovered level for a cut (`FEC_RECOVERED_PCT`) | 5 % | 3 % | 3 % |
+| Time between decreases (`MIN_DEC_INTERVAL_MS`) | 2 s | 1 s | 1 s |
+
+The setting does not change:
+
+- The cut sizes (`DEC_LOSS`, `DEC_DELAY`, `MAX_CUT`, `MEASURED_MARGIN`).
+- The heavy loss rule: heavy loss and delay in the newest window cut at once
+  on each speed (rule 2).
+- The floor, the ceiling, the app-limited guard and its hold.
+- The settle times and the timeouts.
+- The restart mode intervals (`MIN_DEC_INTERVAL_RESTART_MS`,
+  `MIN_INC_INTERVAL_RESTART_MS`). They are independent constants, so they
+  stay the same on each speed. Restart mode doubles the increase step of the
+  speed, so the step stays in proportion.
+
+History: the history holds 12 deltas (3 windows of 1 s). Slow needs 3
+windows, so the history does not change.
+
+Known limit of Slow: the near step (2 %) is smaller than the dead band
+(3 %, rule 6). When the target is 85 % or more of the last failure rate and
+above about 8.3 Mbps (where 3 % is more than 250 kbps), no increase goes
+until the failure memory (`FAILURE_MEMORY_MS`, 60 s) ends. A step to the
+ceiling still goes. The unit test `testSlowNearFailureDeadBand` shows this.

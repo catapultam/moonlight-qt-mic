@@ -321,6 +321,11 @@ StreamCommandLineParser::StreamCommandLineParser()
         {"fullscreen", StreamingPreferences::CSK_FULLSCREEN},
         {"always",     StreamingPreferences::CSK_ALWAYS},
     };
+    m_AdaptiveBitrateSpeedMap = {
+        {"slow",   StreamingPreferences::ABS_SLOW},
+        {"normal", StreamingPreferences::ABS_NORMAL},
+        {"fast",   StreamingPreferences::ABS_FAST},
+    };
 }
 
 StreamCommandLineParser::~StreamCommandLineParser()
@@ -350,6 +355,7 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
     parser.addValueOption("fps", "FPS");
     parser.addValueOption("bitrate", "bitrate in Kbps");
     parser.addToggleOption("adaptive-bitrate", "network adaptive bitrate");
+    parser.addChoiceOption("abr-speed", "adaptive bitrate speed", m_AdaptiveBitrateSpeedMap.keys());
     parser.addValueOption("packet-size", "video packet size");
     parser.addChoiceOption("display-mode", "display mode", m_WindowModeMap.keys());
     parser.addChoiceOption("audio-config", "audio config", m_AudioConfigMap.keys());
@@ -483,6 +489,11 @@ void StreamCommandLineParser::parse(const QStringList &args, StreamingPreference
 
     // Resolve --adaptive-bitrate and --no-adaptive-bitrate options
     preferences->adaptiveBitrate = parser.getToggleOptionValue("adaptive-bitrate", preferences->adaptiveBitrate);
+
+    // Resolve --abr-speed option
+    if (parser.isSet("abr-speed")) {
+        preferences->adaptiveBitrateSpeed = mapValue(m_AdaptiveBitrateSpeedMap, parser.getChoiceOptionValue("abr-speed"));
+    }
 
     // Resolve --background-gamepad and --no-background-gamepad options
     preferences->backgroundGamepad = parser.getToggleOptionValue("background-gamepad", preferences->backgroundGamepad);

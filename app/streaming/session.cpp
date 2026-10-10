@@ -635,13 +635,25 @@ void Session::startAdaptiveBitrate()
     }
 
     uint32_t ceiling = calculateBitrateCeiling();
-    m_BitrateController.start(ceiling, SDL_GetTicks64(), m_Preferences->adaptiveBitrate);
+    AdaptiveBitrate::Speed speed;
+    switch (m_Preferences->adaptiveBitrateSpeed) {
+    case StreamingPreferences::ABS_SLOW:
+        speed = AdaptiveBitrate::Speed::Slow;
+        break;
+    case StreamingPreferences::ABS_FAST:
+        speed = AdaptiveBitrate::Speed::Fast;
+        break;
+    default:
+        speed = AdaptiveBitrate::Speed::Normal;
+        break;
+    }
+    m_BitrateController.start(ceiling, SDL_GetTicks64(), m_Preferences->adaptiveBitrate, speed);
     // D12: with adaptation off, only a live resize with the default bitrate sends a request
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Adaptive bitrate: %s, limit %u kbps, stream start %d kbps",
+                "Adaptive bitrate: %s, limit %u kbps, stream start %d kbps, speed %s",
                 m_Preferences->adaptiveBitrate ? "on" :
                     (m_Preferences->autoAdjustBitrate ? "off (a live resize still sets the bitrate)" : "off"),
-                ceiling, m_StreamConfig.bitrate);
+                ceiling, m_StreamConfig.bitrate, AdaptiveBitrate::speedName(speed));
     publishBitrateState();
 
     m_BitrateTickTimer = SDL_AddTimer(AdaptiveBitrate::TICK_MS, bitrateTickTimerCallback, nullptr);

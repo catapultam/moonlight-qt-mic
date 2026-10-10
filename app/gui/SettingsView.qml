@@ -748,6 +748,59 @@ Flickable {
 
                 Label {
                     width: parent.width
+                    id: adaptiveBitrateSpeedTitle
+                    text: qsTr("Bitrate adaptation speed")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                    enabled: adaptiveBitrateCheck.checked
+                }
+
+                AutoResizingComboBox {
+                    // ignore setting the index at first, and actually set it when the component is loaded
+                    Component.onCompleted: {
+                        var saved_speed = StreamingPreferences.adaptiveBitrateSpeed
+                        currentIndex = 1
+                        for (var i = 0; i < adaptiveBitrateSpeedListModel.count; i++) {
+                            if (saved_speed === adaptiveBitrateSpeedListModel.get(i).val) {
+                                currentIndex = i
+                                break
+                            }
+                        }
+                    }
+
+                    id: adaptiveBitrateSpeedComboBox
+                    hoverEnabled: true
+                    enabled: adaptiveBitrateCheck.checked
+                    textRole: "text"
+                    model: ListModel {
+                        id: adaptiveBitrateSpeedListModel
+                        ListElement {
+                            text: qsTr("Slow")
+                            val: StreamingPreferences.ABS_SLOW
+                        }
+                        ListElement {
+                            text: qsTr("Normal")
+                            val: StreamingPreferences.ABS_NORMAL
+                        }
+                        ListElement {
+                            text: qsTr("Fast")
+                            val: StreamingPreferences.ABS_FAST
+                        }
+                    }
+                    // ::onActivated must be used, as it only listens for when the index is changed by a human
+                    onActivated: {
+                        StreamingPreferences.adaptiveBitrateSpeed = adaptiveBitrateSpeedListModel.get(currentIndex).val
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 10000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Slow reacts less to short changes in the network.") + "\n\n" +
+                                  qsTr("Fast gets back to the full bitrate sooner after a drop, but the bitrate drops more often near the limit of the network.")
+                }
+
+                Label {
+                    width: parent.width
                     id: windowModeTitle
                     text: qsTr("Display mode")
                     font.pointSize: 12

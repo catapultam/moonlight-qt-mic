@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 
 using namespace AdaptiveBitrate;
 
@@ -17,12 +18,12 @@ struct Sim {
     uint32_t framesPerTick = 15;
     uint32_t packetsPerTick = 100;
 
-    explicit Sim(uint32_t ceiling, bool adaptive = true)
+    explicit Sim(uint32_t ceiling, bool adaptive = true, Speed speed = Speed::Normal)
     {
         s.nowMs = 1000;
         s.rttMs = 10;
         s.measuredMbps = ceiling * 0.8 / 1000.0;
-        c.start(ceiling, s.nowMs, adaptive);
+        c.start(ceiling, s.nowMs, adaptive, speed);
     }
 
     Decision step(uint32_t lost = 0, uint32_t rtt = 10, uint32_t recovered = 0)
@@ -640,7 +641,8 @@ static void testSecondStart()
 {
     Sim sim(40000);
     sim.runStart();
-    sim.c.start(10000, sim.s.nowMs, true);
+    sim.c.start(10000, sim.s.nowMs, true, Speed::Slow);
+    assert(sim.c.tuning().stableMs == STABLE_MS);  // the speed of the first start stays
     assert(sim.c.ceilingKbps() == 40000 && sim.c.targetKbps() == 40000);
     Decision d;
     assert(sim.stepUntilSend(d, 20, 1) == 8);  // no new start settle time
@@ -867,7 +869,7 @@ static void testStop()
         assert(!sim.step(5, 60, 10).send);
     }
     assert(!sim.c.setCeiling(20000, sim.s.nowMs).send);
-    sim.c.start(30000, sim.s.nowMs, true);  // a second start does nothing
+    sim.c.start(30000, sim.s.nowMs, true, Speed::Normal);  // a second start does nothing
     assert(!sim.c.running());
 }
 
@@ -949,6 +951,185 @@ static void testTexts()
     assert(strcmp(reasonName(Reason::Resend), "resend") == 0);
 }
 
+// Spec 11: the values of each speed. Normal uses the constants.
+static void testSpeedTuning()
+{
+    const Tuning slow = tuningFor(Speed::Slow);
+    assert(slow.incStepPct == 4 && slow.incStepNearPct == 2);
+    assert(slow.incIntervalMs == 8000 && slow.stableMs == 8000);
+    assert(slow.lossWindows == 3 && slow.lossMinTicks == 3 && slow.delayWindows == 3);
+    assert(slow.fecRecoveredPct == 5 && slow.decIntervalMs == 2000);
+
+    const Tuning normal = tuningFor(Speed::Normal);
+    assert(normal.incStepPct == INC_STEP_PCT && normal.incStepNearPct == INC_STEP_NEAR_PCT);
+    assert(normal.incIntervalMs == MIN_INC_INTERVAL_MS && normal.stableMs == STABLE_MS);
+    assert(normal.lossWindows == LOSS_WINDOWS && normal.lossMinTicks == LOSS_MIN_TICKS);
+    assert(normal.delayWindows == DELAY_WINDOWS);
+    assert(normal.fecRecoveredPct == FEC_RECOVERED_PCT && normal.decIntervalMs == MIN_DEC_INTERVAL_MS);
+    assert(INC_STEP_PCT == 8 && INC_STEP_NEAR_PCT == 3 && MIN_INC_INTERVAL_MS == 4000 && STABLE_MS == 4000);
+    assert(LOSS_WINDOWS == 2 && LOSS_MIN_TICKS == 3 && DELAY_WINDOWS == 2);
+    assert(FEC_RECOVERED_PCT == 3 && MIN_DEC_INTERVAL_MS == 1000);
+
+    const Tuning fast = tuningFor(Speed::Fast);
+    assert(fast.incStepPct == 15 && fast.incStepNearPct == 5);
+    assert(fast.incIntervalMs == 2000 && fast.stableMs == 2000);
+    assert(fast.lossWindows == 2 && fast.lossMinTicks == 2 && fast.delayWindows == 2);
+    assert(fast.fecRecoveredPct == 3 && fast.decIntervalMs == 1000);
+
+    Sim sim(40000, true, Speed::Fast);
+    assert(sim.c.tuning().incStepPct == 15);
+    assert(strcmp(speedName(Speed::Slow), "slow") == 0);
+    assert(strcmp(speedName(Speed::Normal), "normal") == 0);
+    assert(strcmp(speedName(Speed::Fast), "fast") == 0);
+}
+
+// Spec 11: Slow needs 3 lossy windows; 2 give no cut
+static void testSlowLossWindows()
+{
+    Sim sim(40000, true, Speed::Slow);
+    sim.runStart();
+    Decision d;
+    for (int i = 0; i < 8; i++) {
+        d = sim.step(1);
+        assert(!d.send);
+    }
+    assert(d.isolated);  // two lossy windows
+    assert(sim.stepUntilSend(d, 20, 1) == 4);  // the third lossy window
+    assert(d.reason == Reason::Loss && d.targetKbps == 30000);
+
+    // The minimum time between cuts is 2 s
+    uint64_t firstMs = sim.s.nowMs;
+    sim.sendAndAnswer(d);
+    assert(sim.stepUntilSend(d, 40, 1) > 0);
+    assert(d.reason == Reason::Loss);
+    assert(sim.s.nowMs - firstMs >= 2000);
+}
+
+// Spec 11: Fast cuts with 2 lossy ticks; Normal needs 3
+static void testFastLossTicks()
+{
+    for (Speed speed : {Speed::Normal, Speed::Fast}) {
+        Sim sim(40000, true, speed);
+        sim.runStart();
+        Decision d;
+        for (int i = 1; i <= 8; i++) {
+            d = sim.step(i == 1 || i == 5 ? 2 : 0);
+            if (i < 8) {
+                assert(!d.send);
+            }
+        }
+        if (speed == Speed::Fast) {
+            assert(d.send && d.reason == Reason::Loss && d.targetKbps == 30000);
+        }
+        else {
+            assert(!d.send && d.isolated);
+        }
+    }
+}
+
+// Spec 11: the FEC level for a cut is 5 % on Slow
+static void testSlowFec()
+{
+    {
+        Sim sim(40000, true, Speed::Slow);
+        sim.runStart();
+        Decision d;
+        assert(sim.stepUntilSend(d, 20, 0, 10, 4) == -1);
+        assert(sim.c.targetKbps() == 40000);
+    }
+    {
+        Sim sim(40000, true, Speed::Slow);
+        sim.runStart();
+        Decision d;
+        assert(sim.stepUntilSend(d, 12, 0, 10, 5) == 8);
+        assert(d.reason == Reason::FecPressure && d.targetKbps == 36000);
+    }
+}
+
+// Spec 11: Slow needs delay in 3 windows
+static void testSlowDelay()
+{
+    Sim sim(40000, true, Speed::Slow);
+    sim.runStart();
+    for (int i = 0; i < 8; i++) {
+        assert(!sim.step().send);
+    }
+    Decision d;
+    assert(sim.stepUntilSend(d, 16, 0, 35) == 11);  // Normal: 7
+    assert(d.reason == Reason::Delay && d.targetKbps == 36000);
+}
+
+// Spec 11: a heavy burst with delay cuts at once on Slow
+static void testSlowHeavyLoss()
+{
+    Sim sim(40000, true, Speed::Slow);
+    sim.runStart();
+    for (int i = 0; i < 8; i++) {
+        assert(!sim.step().send);
+    }
+    Decision d;
+    assert(sim.stepUntilSend(d, 4, 3, 60) == 3);
+    assert(d.reason == Reason::Loss && d.targetKbps == 30000);
+}
+
+// Spec 11: the increase step and the clean time of Slow and Fast
+static void testSpeedIncrease()
+{
+    {
+        Sim sim(40000, true, Speed::Fast);
+        sim.runStart();
+        Decision d;
+        assert(sim.stepUntilSend(d, 20, 1) == 8 && d.targetKbps == 30000);
+        sim.sendAndAnswer(d);
+        uint64_t decreaseMs = sim.s.nowMs;
+        assert(sim.stepUntilSend(d, 60) > 0);
+        assert(d.reason == Reason::Increase && d.targetKbps == 34500);  // 15 %
+        assert(sim.s.nowMs - decreaseMs >= CHANGE_SETTLE_MS + 2000 - TICK_MS);
+        assert(sim.s.nowMs - decreaseMs < CHANGE_SETTLE_MS + STABLE_MS);
+        sim.sendAndAnswer(d);
+        uint64_t increaseMs = sim.s.nowMs;
+        assert(sim.stepUntilSend(d, 60) > 0);
+        assert(d.reason == Reason::Increase && d.targetKbps == 36225);  // near the failure rate: 5 %
+        assert(sim.s.nowMs - increaseMs >= 2000);
+    }
+    {
+        Sim sim(40000, true, Speed::Slow);
+        sim.runStart();
+        Decision d;
+        assert(sim.stepUntilSend(d, 20, 1) == 12 && d.targetKbps == 30000);
+        sim.sendAndAnswer(d);
+        uint64_t decreaseMs = sim.s.nowMs;
+        assert(sim.stepUntilSend(d, 80) > 0);
+        assert(d.reason == Reason::Increase && d.targetKbps == 31200);  // 4 %
+        assert(sim.s.nowMs - decreaseMs >= CHANGE_SETTLE_MS + 8000 - TICK_MS);
+        sim.sendAndAnswer(d);
+        uint64_t increaseMs = sim.s.nowMs;
+        assert(sim.stepUntilSend(d, 80) > 0);
+        assert(d.reason == Reason::Increase && d.targetKbps == 32448);  // 4 %
+        assert(sim.s.nowMs - increaseMs >= 8000);
+    }
+}
+
+// Spec 11: on Slow, the near step (2 %) is below the dead band (3 %). Near the last
+// failure rate, no increase goes until the failure memory (60 s) ends.
+static void testSlowNearFailureDeadBand()
+{
+    Sim sim(40000, true, Speed::Slow);
+    sim.runStart();
+    Decision d;
+    assert(sim.stepUntilSend(d, 20, 1) > 0 && d.targetKbps == 30000);
+    sim.sendAndAnswer(d);
+    uint64_t failureMs = sim.s.nowMs;
+    while (sim.c.targetKbps() * 100 < NEAR_FAILURE_PCT * 40000) {
+        assert(sim.stepUntilSend(d, 80) > 0 && d.reason == Reason::Increase);
+        sim.sendAndAnswer(d);
+    }
+    assert(sim.c.targetKbps() == 35094);
+    assert(sim.stepUntilSend(d, 400) > 0 && d.reason == Reason::Increase);
+    assert(sim.s.nowMs - failureMs >= FAILURE_MEMORY_MS);
+    assert(d.targetKbps == 36497);  // 4 %: the failure memory ended
+}
+
 int main()
 {
     testCleanNetwork();
@@ -996,6 +1177,14 @@ int main()
     testNotAdaptive();
     testCounterWrap();
     testTexts();
+    testSpeedTuning();
+    testSlowLossWindows();
+    testFastLossTicks();
+    testSlowFec();
+    testSlowDelay();
+    testSlowHeavyLoss();
+    testSpeedIncrease();
+    testSlowNearFailureDeadBand();
     puts("adaptivebitrate_test: all checks passed");
     return 0;
 }

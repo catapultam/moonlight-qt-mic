@@ -46,6 +46,8 @@ constexpr double LOSS_WINDOW_PCT = 2;              // a 1 s window with this fra
 constexpr double LOSS_HEAVY_PCT = 10;
 constexpr uint32_t LOSS_MIN_FRAMES = 10;           // plan: fewer frames in a window give no loss signal
 constexpr uint32_t LOSS_MIN_TICKS = 3;             // plan: sustained loss needs this many ticks with loss in 3 s
+constexpr uint32_t LOSS_WINDOWS = 2;               // sustained loss: this many of the last 3 windows are lossy
+constexpr uint32_t DELAY_WINDOWS = 2;              // sustained delay: this many newest windows show delay
 constexpr uint32_t FEC_RECOVERED_PCT = 3;          // recovered / video packets over 2 s
 constexpr uint32_t FEC_MIN_PACKETS = 200;          // plan: fewer packets in 2 s give no FEC signal
 constexpr uint32_t RTT_RISE_MIN_MS = 15;           // delay: RTT > baseline + max(15, baseline / 2)
@@ -85,6 +87,59 @@ constexpr size_t WINDOWS = 3;
 constexpr size_t HISTORY = WINDOW_TICKS * WINDOWS; // plan: 3 s of deltas
 constexpr size_t FEC_TICKS = 8;                    // a 2 s window
 constexpr size_t RTT_BUCKETS = RTT_BASELINE_MS / 1000;
+
+// The adaptation speed setting (spec section 11). Slow reacts less to short network
+// changes; Fast gets back to the full bitrate sooner after a dip. Normal uses the
+// constants above. The setting does not change the cut sizes, the heavy loss rule,
+// the floor, the ceiling, the app-limited guard, the settle times, the restart mode
+// intervals and the timeouts.
+enum class Speed {
+    Slow,
+    Normal,
+    Fast,
+};
+
+inline const char* speedName(Speed speed)
+{
+    switch (speed) {
+    case Speed::Slow: return "slow";
+    case Speed::Fast: return "fast";
+    default: return "normal";
+    }
+}
+
+// The values that the speed setting changes
+struct Tuning {
+    uint32_t incStepPct;       // INC_STEP_PCT
+    uint32_t incStepNearPct;   // INC_STEP_NEAR_PCT
+    uint32_t incIntervalMs;    // MIN_INC_INTERVAL_MS
+    uint32_t stableMs;         // STABLE_MS
+    uint32_t lossWindows;      // LOSS_WINDOWS
+    uint32_t lossMinTicks;     // LOSS_MIN_TICKS
+    uint32_t delayWindows;     // DELAY_WINDOWS
+    uint32_t fecRecoveredPct;  // FEC_RECOVERED_PCT
+    uint32_t decIntervalMs;    // MIN_DEC_INTERVAL_MS
+};
+
+constexpr Tuning tuningFor(Speed speed)
+{
+    switch (speed) {
+    case Speed::Slow:
+        return Tuning{4, 2, 8000, 8000, 3, LOSS_MIN_TICKS, 3, 5, 2000};
+    case Speed::Fast:
+        return Tuning{15, 5, 2000, 2000, LOSS_WINDOWS, 2, DELAY_WINDOWS, FEC_RECOVERED_PCT, MIN_DEC_INTERVAL_MS};
+    default:
+        return Tuning{INC_STEP_PCT, INC_STEP_NEAR_PCT, MIN_INC_INTERVAL_MS, STABLE_MS, LOSS_WINDOWS,
+                      LOSS_MIN_TICKS, DELAY_WINDOWS, FEC_RECOVERED_PCT, MIN_DEC_INTERVAL_MS};
+    }
+}
+
+// The window counts must fit in the history
+static_assert(tuningFor(Speed::Slow).lossWindows <= WINDOWS && tuningFor(Speed::Slow).delayWindows <= WINDOWS,
+              "the history holds WINDOWS windows");
+static_assert(tuningFor(Speed::Fast).lossWindows <= WINDOWS && tuningFor(Speed::Fast).delayWindows <= WINDOWS,
+              "the history holds WINDOWS windows");
+static_assert(LOSS_WINDOWS <= WINDOWS && DELAY_WINDOWS <= WINDOWS, "the history holds WINDOWS windows");
 
 // Cumulative values at one tick
 struct Sample {
@@ -197,14 +252,15 @@ public:
     // Starts the controller at the first decoded frame of the session. A second
     // call does nothing (spec 4.4). adaptive == false: no rule runs. Only setCeiling(),
     // a resend after a timeout and a resend of the ceiling after ENCODER_FAILED
-    // make requests (spec D12).
-    void start(uint32_t ceilingKbps, uint64_t nowMs, bool adaptive)
+    // make requests (spec D12). speed sets the tuning values (spec section 11).
+    void start(uint32_t ceilingKbps, uint64_t nowMs, bool adaptive, Speed speed)
     {
         if (m_Started) {
             return;
         }
         m_Started = true;
         m_Adaptive = adaptive;
+        m_Tuning = tuningFor(speed);
         m_StartPhase = adaptive;
         m_Ceiling = ceilingKbps;
         m_Target = ceilingKbps;
@@ -319,7 +375,7 @@ public:
             if (packets > 0) {
                 d.fecPct = 100.0 * recovered / packets;
             }
-            fecPressure = packets >= FEC_MIN_PACKETS && (uint64_t)recovered * 100 >= (uint64_t)FEC_RECOVERED_PCT * packets;
+            fecPressure = packets >= FEC_MIN_PACKETS && (uint64_t)recovered * 100 >= (uint64_t)m_Tuning.fecRecoveredPct * packets;
         }
 
         d.lossPct[0] = w[0].lossPct;
@@ -350,8 +406,13 @@ public:
         // bitrate cannot fix delay or FEC pressure that this stream does not cause.
         const bool notAppLimited = aboveAppLimit(sample.measuredMbps);
         const bool delayNotAppLimited = aboveAppLimit(guardMbps);
-        const bool sustainedLoss = (lossyWindows >= 2 && lossyTicks >= LOSS_MIN_TICKS) || (w[0].heavy && w[0].delay);
-        const bool sustainedDelay = w[0].delay && w[1].delay;
+        // Heavy loss with delay in the newest window cuts at once on each speed
+        const bool sustainedLoss = ((uint32_t)lossyWindows >= m_Tuning.lossWindows && lossyTicks >= m_Tuning.lossMinTicks) ||
+                (w[0].heavy && w[0].delay);
+        bool sustainedDelay = true;
+        for (size_t i = 0; i < m_Tuning.delayWindows; i++) {
+            sustainedDelay = sustainedDelay && w[i].delay;
+        }
         uint32_t newKbps = m_Target;
         Reason reason = Reason::None;
 
@@ -399,11 +460,11 @@ public:
         else {
             // Rule 5
             const uint64_t cleanSince = m_LastBadMs > m_CleanSinceMs ? m_LastBadMs : m_CleanSinceMs;
-            const bool stable = now - cleanSince >= STABLE_MS;
+            const bool stable = now - cleanSince >= m_Tuning.stableMs;
             if (m_Target < m_Ceiling && stable && notAppLimited) {
                 const bool nearFailure = m_HaveFailure && now - m_LastFailureMs < FAILURE_MEMORY_MS &&
                         (uint64_t)m_Target * 100 >= (uint64_t)NEAR_FAILURE_PCT * m_LastFailureKbps;
-                uint32_t pct = nearFailure ? INC_STEP_NEAR_PCT : INC_STEP_PCT;
+                uint32_t pct = nearFailure ? m_Tuning.incStepNearPct : m_Tuning.incStepPct;
                 if (m_RestartMode) {
                     pct *= 2;
                 }
@@ -421,13 +482,13 @@ public:
             return d;
         }
         if (newKbps < m_Target) {
-            const uint32_t interval = m_RestartMode ? MIN_DEC_INTERVAL_RESTART_MS : MIN_DEC_INTERVAL_MS;
+            const uint32_t interval = m_RestartMode ? MIN_DEC_INTERVAL_RESTART_MS : m_Tuning.decIntervalMs;
             if (m_HaveDecrease && now - m_LastDecreaseMs < interval) {
                 return d;
             }
         }
         else {
-            const uint32_t interval = m_RestartMode ? MIN_INC_INTERVAL_RESTART_MS : MIN_INC_INTERVAL_MS;
+            const uint32_t interval = m_RestartMode ? MIN_INC_INTERVAL_RESTART_MS : m_Tuning.incIntervalMs;
             if (m_HaveIncrease && now - m_LastIncreaseMs < interval) {
                 return d;
             }
@@ -611,6 +672,7 @@ public:
     bool started() const { return m_Started; }
     bool running() const { return m_Started && !m_Stopped; }
     bool adaptive() const { return m_Adaptive; }
+    const Tuning& tuning() const { return m_Tuning; }
     bool pending() const { return m_Pending; }
     bool restartMode() const { return m_RestartMode; }
     uint32_t targetKbps() const { return m_Target; }
@@ -761,6 +823,7 @@ private:
     bool m_Started = false;
     bool m_Stopped = false;
     bool m_Adaptive = false;
+    Tuning m_Tuning = tuningFor(Speed::Normal);
     bool m_StartPhase = false;
     uint32_t m_StartAttempts = 0;
     uint32_t m_Ceiling = 0;
