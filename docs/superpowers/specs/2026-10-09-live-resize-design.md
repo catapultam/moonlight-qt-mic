@@ -132,9 +132,16 @@ upstream Sunshine owns it.
 
 - `videoThread` (`src/stream.cpp:2032`) calls `video::capture(session->mail,
   session->config.monitor, session)` with a copy of `config_t`.
-- All Windows encoders have `PARALLEL_ENCODING` (`src/video.cpp:523, 730,
-  836, 907`), so `capture()` always calls `capture_async()`
-  (`src/video.cpp:2354`). The sync path is not used.
+- `capture()` (`src/video.cpp:2472`) takes `config_t config` by value. It
+  calls `capture_async()` (`src/video.cpp:2354`) when
+  `chosen_encoder->flags & PARALLEL_ENCODING`, else `encode_run_sync()`.
+  NVENC, Quick Sync and AMF have `PARALLEL_ENCODING`. The `software`
+  encoder (`src/video.cpp:841`) does not, so with the software encoder the
+  sync path runs. The sync path does not read `mail::resize`, so live
+  resize works only with `PARALLEL_ENCODING` (section 4.5).
+- `capture_async` changes only its own copy of `config_t`.
+  `session->config.monitor` keeps the size from the stream start. The
+  control side must track the current stream size itself (section 4.2).
 - `capture_async` loops: wait while `reinit_event` is set, take the current
   display, `make_encode_device(*display, encoder, config)`, raise
   `touch_port` (`make_port(display, config)`, `src/video.cpp:2054`), raise
@@ -164,14 +171,38 @@ upstream Sunshine owns it.
 
 ### 4.2 New state
 
-- `session_t::control` gains `safe::mail_raw_t::event_t<resize_result_t>
-  resize_queue` (mail name `resize_refused`), drained in
-  `controlBroadcastThread` next to `hdr_queue` (`src/stream.cpp:1189-1194`).
-- `session_t` gains `std::atomic<bool> resize_in_progress`.
-- New session-local mail `MAIL(resize)` in `src/globals.h` with payload
-  `std::pair<int,int>`; `capture_async` consumes it.
+Session-local mails in `src/globals.h`. `mail_raw_t::event<T>` casts the
+stored event to `T` with no check, so every raise and every read must use
+exactly the type below. Another type is undefined behavior.
+
+| Mail | Type | Raised by | Read by |
+|------|------|-----------|---------|
+| `resize` | `std::pair<int, int>` | control handler (new size); worker (old size, revert) | `capture_async`, top of loop. Worker drains it with `pop(0ms)` on a failure. |
+| `resize_refused` | `std::uint16_t` (`live_resize::reason_e`) | `capture_async` (`encoder_failed`); worker (other reasons) | control thread |
+| `resize_done` | `bool` | `encode_run`, at every encoder session start | control thread |
+| `encoder_failed` | `bool` | `encode_run`, when `make_encode_session()` returns null | `capture_async`, after each `encode_run` |
+
+Mail rules (`src/thread_safe.h`):
+
+- An event holds one value. `raise()` overwrites a value that nobody read.
+- A mail lives only while a handle (the `shared_ptr` from `event<T>()`)
+  exists. A raise on a mail with no holder is lost: the temporary handle
+  drops, and the next `event<T>()` makes a new empty event. So the control
+  side keeps a persistent handle on `resize_done` and `resize_refused` for
+  the session life, as `hdr_queue` does (`src/stream.cpp:2349`).
+
+Other state:
+
+- `session_t::control` gains `resize_refused` and `resize_done` handles,
+  drained in `controlBroadcastThread` next to `hdr_queue`
+  (`src/stream.cpp:1199-1201`).
+- `session_t` gains `std::atomic<bool> resize_in_progress` and the current
+  stream size (width, height). The control side sets the size at stream
+  start from `config.monitor` and updates it when a resize completes. It
+  must not read `session->config.monitor` for the current size.
 - `capture_async` keeps `config_t last_good_config` and a flag
-  `resize_pending`.
+  `resize_pending`. Both are local to the capture thread. The control
+  thread cannot read them.
 
 ### 4.3 VDD change
 
@@ -269,15 +300,30 @@ loop, which it reaches when `encode_run` exits on `reinit_event`.
    does not apply the size. If the capture thread already consumed it, the
    worker raises `mail::resize` with the old size and the display revert
    (section 4.3 step 8) triggers the reinit that applies it.
-4. Encoder failure: `encode_run` returns at once when
-   `make_encode_session` returns null (`src/video.cpp:1914`). Today
-   `capture_async` then loops without delay and tries again forever. Add a
-   check: when `encode_run` returns and neither `shutdown_event` nor
-   `reinit_event` is set and `resize_pending` is true, restore
-   `config = last_good_config`, queue `ENCODER_FAILED`, and ask the VDD
-   worker to revert the display. Clear `resize_pending` when `encode_run`
-   has encoded at least one frame at the new size.
-5. The new encoder session starts with an IDR. The client also requests an
+4. Encoder start: `encode_run` raises `resize_done` each time an encoder
+   session starts, also at reinits with no resize. The control side ignores
+   it when no resize is in progress.
+5. Encoder failure: when `make_encode_session` returns null
+   (`src/video.cpp:1914`), `encode_run` raises `encoder_failed` and
+   returns. After each `encode_run`, `capture_async` pops `encoder_failed`
+   (this also clears a stale value). If it is set and `resize_pending` is
+   true, `capture_async` restores `config = last_good_config` and raises
+   `resize_refused` with `reason_e::encoder_failed`. It always clears
+   `resize_pending` after `encode_run` returns. `capture_async` does not
+   revert the display. When the control side gets this refusal, it tells
+   the worker to change the display back to the old size (section 4.3
+   step 8).
+6. Not covered: `make_encode_device` (`src/video.cpp:2428-2430`). When it
+   fails at the new size, `capture_async` returns, the stream ends, and
+   nothing is reverted.
+7. Control side contract (Task 8):
+   - When a request starts, drain `resize_done` with `pop(0ms)`, so that an
+     encoder start from before the request is not taken as the result.
+   - Check `resize_refused` before `resize_done`. After an encoder failure
+     the old-size encoder can start and raise `resize_done` too.
+   - On `resize_done` during a resize, set the tracked stream size to the
+     new size and clear `resize_in_progress`.
+8. The new encoder session starts with an IDR. The client also requests an
    IDR after its decoder recreate, so a second IDR is normal.
 
 Limits checked in the control handler before anything changes:
@@ -285,9 +331,15 @@ Limits checked in the control handler before anything changes:
 - Width and height are even, at least 320 x 200, and at most 8192 x 8192.
   With H.264 (`config.videoFormat == 0`) the maximum is 4096 x 4096
   (same rule as the client, `Connection.c:322-326`).
+- The size checks use the stream size that the control side tracks
+  (section 4.2), not `session->config.monitor`. `config.videoFormat` does
+  not change during a stream, so `session->config.monitor.videoFormat` is
+  correct for the H.264 check.
 - The host cannot ask the encoder for its maximum from the control thread
   (`NV_ENC_CAPS_WIDTH_MAX` needs an open encoder, `nvenc_base.cpp:191`).
-  The encoder-failure revert in step 4 covers the remaining cases.
+  The encoder-failure revert in step 5 covers a size that
+  `make_encode_session` refuses. It does not cover a failure in
+  `make_encode_device` (step 6).
 
 Padding: the frame header of the host has no size fields. The client learns
 the new size from the decoded frame (section 5.4).
@@ -296,15 +348,15 @@ the new size from the decoded frame (section 5.4).
 
 | Reason | Check |
 |--------|-------|
-| `BUSY` | `session->resize_in_progress` is set, or `resize_pending` in `capture_async` is still set. |
+| `BUSY` | `session->resize_in_progress` is set. The control side clears it only after `resize_done` or `resize_refused` for the request, or after the watchdog (section 4.6). |
 | `NOT_VIRTUAL_DISPLAY` | `!proc::proc.virtual_display` (`src/process.h:111`) or `vDisplayDriverStatus != OK` (`src/process.cpp:63`). |
 | `MULTIPLE_CLIENTS` | `rtsp_stream::session_count() > 1` (`src/rtsp.cpp:653`). |
 | `SIZE_LIMIT` | Limits in section 4.4. Also when `config.input_only` is set. |
 | `DISPLAY_FAILED` | Step 4 or 5 of section 4.3 failed and the revert ran. |
-| `ENCODER_FAILED` | Section 4.4 step 4. |
+| `ENCODER_FAILED` | Section 4.4 step 5. Also, before anything changes, when `!(chosen_encoder->flags & PARALLEL_ENCODING)`: the sync path (software encoder) cannot follow a resize (section 4.1). |
 
-The handler also drops a request whose size equals the current
-`config.width x config.height` without a reply. The client does not send
+The handler also drops a request whose size equals the current stream size
+that the control side tracks (section 4.2) without a reply. The client does not send
 such a request (D4), but the host must be safe.
 
 Permission: the request needs no new `crypto::PERM` bit. The session that
@@ -326,11 +378,20 @@ streams the display may resize it. Reviewers may decide to gate it behind
   already writes them while the capture thread may run. The worker follows
   the same pattern. The spike in section 8 checks that the capture thread
   recovers when the name changes.
-- `resize_in_progress` is cleared by the worker when it finishes, and by
-  `capture_async` when `resize_pending` clears, whichever is later. Use a
-  small counter or two flags; the reviewer should check that a crash in the
-  worker cannot leave the session blocked. A watchdog clears the flag after
-  15 seconds.
+- Mails are the only channel between the control thread, the worker and
+  `capture_async`. The control thread cannot read `resize_pending` or
+  `last_good_config`.
+- `resize_in_progress` is set by the control handler and cleared by the
+  control side when the worker is finished and the control thread got
+  `resize_done` or `resize_refused` for the request, whichever is later.
+  Use a small counter or two flags; the reviewer should check that a crash
+  in the worker cannot leave the session blocked. A watchdog clears the
+  flag after 15 seconds. On a watchdog timeout the worker or control side
+  drains `mail::resize` with `pop(0ms)`, so that a later unrelated reinit
+  does not apply a stale size.
+- After a refusal from the encoder (`resize_refused` with
+  `encoder_failed`), the worker reverts the display to the old size.
+  `capture_async` already restored its `config`.
 - `session::stop` and `proc_t::terminate` while the worker runs: `terminate`
   removes the VDD by GUID (`src/process.cpp:759-767`). If it runs between
   worker step 2 (remove) and step 3 (add), the worker re-adds a monitor
@@ -679,7 +740,7 @@ implementation.
 | R2 | The capture thread does not find the re-added display because the device name changed, and `refresh_displays` falls back to a physical display. | Spike S1 also runs during a stream. Check that `Desktop resolution [...]` in the log shows the new VDD. If the fallback picks another display, the worker must set `proc::proc.display_name` before the capture thread reinitializes, or the capture thread must wait for the worker (a `mail::resize_display_ready` event). |
 | R3 | Windows resets the display scale for the re-added monitor, so the host desktop looks different after each resize. | Measured in S1. If it happens, keep it as a known effect (U1), or test adding the new monitor before removing the old one (new GUID, update `display_guid`); that keeps a display attached but also changes the identity. |
 | R4 | The 2025-07 `ci-windows.yml` cannot build the 2026-03 tree. | Resolved by spike S2 (2026-10-09): fork `catapultam/apollo-microphone`, branch `live-resize` = `0affdaa6` + 4 commits: a build-only `.github/workflows/build-windows.yml` (runner's MSYS2 at `C:\msys64` with `release: false`, because `cmake/targets/common.cmake` finds `npm-cli.js` only there), the `moonlight-common-c` submodule URL set to `logabell/moonlight-common-c` (pinned `6a276a66` is on no branch; GitHub serves it by hash), and `#define DATA_SHARDS_MAX 255` in `src/stream.cpp` (the upstream-based mic `moonlight-common-c` does not include an `rs.h` that defines it; the installed host build was a local dirty build with the same gap). Run `37974002618` passed and produced `Apollo.exe` (NSIS installer) and `Apollo.zip`. |
-| R5 | The encoder rejects the new size and `capture_async` spins (pre-existing bug made reachable). | Section 4.4 step 4 adds the revert. Test it by sending a size above the H.264 limit with the limit check disabled. |
+| R5 | The encoder rejects the new size and `capture_async` spins (pre-existing bug made reachable). | Section 4.4 step 5 adds the revert. Test it by sending a size above the H.264 limit with the limit check disabled. |
 | R6 | The decoded frame at the new size reaches a renderer before the recreate and crashes `SdlRenderer`. | Section 5.4 drops the frame. Test with `--video-decoder software` and the SDL renderer path forced. |
 | R7 | On GNOME Wayland `SDL_GetWindowSizeInPixels` reports a size that differs from the real buffer with fractional scaling, or the full-screen value is the emulated mode. | Resolved by spike S3 (2026-10-09): windowed and borderless full-screen sizes are physical pixels at 100 % and 125 % scale (window size, pixel size and Vulkan drawable size are equal). Exclusive full screen reports the emulated mode; D9 uses the desktop mode there. |
 | R8 | A refusal arrives after the timeout, or two requests interleave. | `request_id` matching (section 3.1) and the pending state machine. Unit test the state transitions. |
