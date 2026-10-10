@@ -331,7 +331,7 @@ Values (constants in `adaptivebitrate.h`; tests use the same names):
 | `STABLE_MS` | 4000 | Clean time before an increase |
 | `NEAR_FAILURE_PCT` | 85 | "Near" means the target is >= 85 % of the last failure rate (memory of 60 s) |
 | `APP_LIMITED_PCT` | 40 | Increase (rule 5), and decrease on delay or FEC pressure (rule 3), only when the measured bitrate is >= 40 % of `encoder_kbps`. A static picture measures far below 40 %: in the end-to-end test a static desktop measured 0.1-1.3 Mbps with `encoder_kbps` at 30-50 Mbps (below 3 %). The end-to-end test with full motion measured only 63-75 % of `encoder_kbps` (the host sends fewer frames than the frame rate; the CBR encoder undershoots), so 70 % blocked the increase after the network recovered. |
-| `APP_LIMITED_HOLD_MS` | 5000 | Rule 3: for this time after a bad period starts, the app-limited test uses the larger of the measured bitrate and the measured bitrate of the last clean tick |
+| `APP_LIMITED_HOLD_MS` | 5000 | Rule 3: for this time after a bad period starts, the app-limited test uses the larger of the measured bitrate and the measured bitrate of the last clean tick. A settle time removes the stored value (4.3). |
 | `DEAD_BAND_PCT`, `DEAD_BAND_MIN_KBPS` | 3, 250 | Changes smaller than `max(3 %, 250 kbps)` are not sent, except a change to the floor or the ceiling. 250 kbps is also the smallest increase step. |
 | `MIN_DEC_INTERVAL_MS`, `MIN_DEC_INTERVAL_RESTART_MS` | 1000, 3000 | Between two decreases (in place, restart mode) |
 | `MIN_INC_INTERVAL_MS`, `MIN_INC_INTERVAL_RESTART_MS` | 4000, 15000 | Between two increases (in place, restart mode) |
@@ -406,9 +406,25 @@ RTT delay.
 Congestion on a busy stream: the measured bitrate is a 2.5 s mean, and
 congestion lowers it. When rule 3 fires, a busy stream can thus look
 app-limited. For this reason, rule 3 uses the measured bitrate of the last
-clean tick for the first `APP_LIMITED_HOLD_MS` of a bad period. A static
-desktop has a clean measured bitrate of about 1 Mbps, so it stays blocked.
-Rule 5 uses only the current measured bitrate.
+clean tick for the first `APP_LIMITED_HOLD_MS` of a bad period. A clean tick
+has full windows (8 deltas), no lossy window, no delay and no FEC pressure.
+A bad period starts at the first tick with a lossy window, delay or FEC
+pressure, and ends at the next clean tick. Each settle time (after a status
+`APPLIED`, `APPLIED_RESTART` or `ENCODER_FAILED`, and after a live resize)
+removes the stored value and ends the bad period. Thus the hold does not
+start again after a cut or a settle. A static desktop that stays static has
+a clean measured bitrate of about 1 Mbps, so the hold does not unblock
+rule 3 for it. Rule 5 uses only the current measured bitrate.
+Known limits of the hold:
+- If the measured bitrate falls before the RTT shows delay, the clean ticks
+  store the low value, and the hold does not help.
+- A collapse that lasts longer than `APP_LIMITED_HOLD_MS`: after 5 s, rule
+  3 uses the current measured bitrate. If it stays below 40 %, only the
+  loss rule cuts.
+- When motion ends, the measured bitrate (a 2.5 s mean) falls slowly, and
+  the clean ticks store values that are still high. RTT jitter in the next
+  5 s or so can thus cause one 10 % cut. Then the baseline follows the RTT
+  (rebase).
 The guard is relative to `encoder_kbps`. Near the floor, a static picture
 can thus still be cut on delay or FEC pressure until `encoder_kbps` is
 about 2.5 times its static rate.
@@ -975,6 +991,8 @@ with a fake clock:
    39 % (app-limited): no change. A busy stream (65 %) whose measured
    bitrate falls to 20 % with the delay: a decrease. Motion after a static
    period with a high RTT: one decrease at most, then the baseline follows.
+   A busy stream (65 %), a settle, then a static picture (3 %) with delay:
+   no change.
 7. FEC pressure only: decrease to 90 %. At measured 10 % (app-limited): no
    change. Sustained loss at measured 10 %: a decrease.
 8. Recovery: after `STABLE_MS` with no loss and measured >= 40 %: increase

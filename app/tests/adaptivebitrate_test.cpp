@@ -288,6 +288,25 @@ static void testCongestionCollapseDecreases()
     assert(d.reason == Reason::Delay && d.targetKbps == 36000);
 }
 
+// A busy stream (65 %), then a settle (a live resize to the same limit), then a static
+// picture (3 %) with sustained delay: the clean value of the busy stream is gone, no cut
+static void testSettleClearsCleanMeasured()
+{
+    Sim sim(40000);
+    sim.runStart();
+    sim.s.measuredMbps = 32.0 * 0.65;
+    for (int i = 0; i < 12; i++) {
+        assert(!sim.step().send);
+    }
+    Decision c = sim.c.setCeiling(40000, sim.s.nowMs);
+    assert(!c.send);
+    sim.s.measuredMbps = 32.0 * 0.03;
+    for (int i = 0; i < 60; i++) {
+        assert(!sim.step(0, 35).send);
+    }
+    assert(sim.c.targetKbps() == 40000);
+}
+
 // Motion starts after a static period, and the RTT stays high: at most one delay
 // decrease (10 %), then the baseline follows the RTT
 static void testMotionStartAfterStatic()
@@ -944,6 +963,7 @@ int main()
     testBusyStreamDelayDecreases();
     testDelayAtAppLimit();
     testCongestionCollapseDecreases();
+    testSettleClearsCleanMeasured();
     testMotionStartAfterStatic();
     testStaticStreamFecNoDecrease();
     testStaticStreamLossDecreases();

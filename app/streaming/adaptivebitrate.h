@@ -595,13 +595,17 @@ public:
         m_Stopped = true;
     }
 
-    // No decision until nowMs + durationMs; the windows start again
+    // No decision until nowMs + durationMs; the windows start again. The measured value
+    // of the last clean tick and the bad period end: the stream after a change, a restart
+    // or a resize can be different (rule 3, APP_LIMITED_HOLD_MS).
     void notifySettle(uint64_t nowMs, uint32_t durationMs)
     {
         if (nowMs + durationMs > m_SettleUntilMs) {
             m_SettleUntilMs = nowMs + durationMs;
         }
         clearHistory(nowMs);
+        m_InBadPeriod = false;
+        m_CleanMeasuredMbps = 0;
     }
 
     bool started() const { return m_Started; }
