@@ -122,7 +122,7 @@ in `Limelight.h`):
 | 2 | `UNCHANGED` | The encoder already runs at this value. Nothing changed. |
 | 3 | `NOT_SUPPORTED` | The encoder path cannot change the bitrate (sync path, section 5.5). |
 | 4 | `INVALID` | `configured_kbps` is out of limits (section 5.2). |
-| 5 | `ENCODER_FAILED` | The restart at the new bitrate failed. The encoder runs at the old bitrate. |
+| 5 | `ENCODER_FAILED` | The restart at the new bitrate failed, or the host refused a value of 0 kbps or less. The encoder runs at the old bitrate. |
 | 6 | `INPUT_ONLY` | The session has no video (`config.input_only`). |
 
 ### 3.2 Byte order
@@ -579,7 +579,7 @@ Known effects and limits:
   mode on, and later in-place changes wait for the 2 s restart interval.
 - A change with `encoder_kbps <= 0` gives result `ENCODER_FAILED` and a
   warning log, in the `encode_run` loop and at the top of the
-  `capture_async` loop. The host does not start a new encoder, and the
+  `capture_async` loop. The host does not start an encoder at the new bitrate, and the
   encoder keeps its bitrate. The control thread then counts it as a
   failed restart: restart mode goes on and the 2 s interval starts.
 - When `make_encode_device` fails in `capture_async`, the function returns
