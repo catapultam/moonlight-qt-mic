@@ -237,7 +237,7 @@ last 8 deltas (2 s at the tick rate).
 
 | Signal | Source | Writer thread | Update rate |
 |--------|--------|---------------|-------------|
-| Frames finished and lost | New cumulative counters in `connectionSawFrame()` and `connectionReceivedCompleteFrame()` (`ControlStream.c:466, 506`), read with new `LiGetVideoFrameCounters()`. One function updates both counters for a frame, so a tick boundary cannot show a false loss | video receive thread | each frame |
+| Frames finished and lost | New cumulative counters, changed only in `connectionSawFrame()` (`ControlStream.c`). It reads `lastGoodFrame`, which `connectionReceivedCompleteFrame()` sets as before. Read with new `LiGetVideoFrameCounters()`. One function changes both counters for a frame under one mutex, and the read takes the same mutex, so the pair is consistent and a tick boundary cannot show a false loss | video receive thread | each frame |
 | FEC packets recovered and failed, video packets | `RTP_VIDEO_STATS` (`Limelight.h:948-956`, `LiGetRTPVideoStats()`). `RtpVideoQueue.c` did not count recovered video packets; the client now counts them in `reconstructFrame()` | video receive thread | each packet |
 | RTT and RTT variance | `LiGetEstimatedRttInfo()` (ENet `roundTripTime`, smoothed) | ENet service | each ACK of a reliable packet; the periodic ping is reliable and goes each 100 ms (`ControlStream.c:332, 1500-1512`) |
 | Measured bitrate | New session-owned `BandwidthTracker` (reuse `app/streaming/bandwidth.h`), fed in `Session::drSubmitDecodeUnit` (`session.cpp:630`) with `du->fullLength` | decoder submit thread | each frame; average over the last 2.5 s |
@@ -249,9 +249,25 @@ Notes:
   `networkDroppedFrames` resets when the decoder is created again
   (`ffmpeg.cpp:2185`), which a live resize does. So the spec adds cumulative
   `uint32_t` counters. Update the "seen" counter before the early returns of
-  the first sample period (`ControlStream.c:513-521`). The controller reads
-  them with no lock. A torn read is acceptable, as the comment in
-  `LiGetEstimatedRttInfo` says (`ControlStream.c:1806-1809`).
+  the first sample period (`ControlStream.c:513-521`). A small mutex
+  (`frameCounterMutex`, created in `initializeControlStream()`) protects the
+  pair; the video receive thread takes it once for each new frame.
+- Known effect: a frame that the depacketizer drops counts as lost, because
+  `connectionReceivedCompleteFrame()` does not run for it. This includes the
+  frames that the depacketizer drops while it waits for an IDR frame, after
+  `requestDecoderRefresh()` (decoder error or recreate) or a decode unit
+  queue overflow, or for a reference frame invalidation after a real loss.
+  The existing 3 s loss check of common-c counts these frames the same way.
+  The controller does not have a special case for them. The rules absorb
+  them as follows: after `APPLIED_RESTART` and after a live resize,
+  `RESTART_SETTLE_MS` (3 s) blocks decisions (rule 1); when it ends, the
+  three 1 s windows of rule 2 no longer contain the frames that the IDR wait
+  dropped. A single IDR wait at another time (for example a decoder
+  error) usually lasts less than one 1 s window, so it gives one lossy
+  window at most, and rule 4 makes no change. An IDR wait that follows a
+  real network loss adds lost frames to that loss; this makes the loss
+  signal larger, but it does not start a decrease without a real loss in a
+  second window.
 - The `BandwidthTracker` in `FFmpegVideoDecoder` (`ffmpeg.h:118`) also
   resets with the decoder, and other decoders do not have it. The session
   tracker covers all decoders and lives for the session.
