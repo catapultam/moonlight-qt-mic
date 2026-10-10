@@ -43,7 +43,7 @@ the same in `0affdaa6`, except that `src/stream.cpp` from line 1398 and
 | D7 | The host refuses the request when more than one client session is active, when the capture display is not a SudoVDA monitor, when a resize is in progress, or when the size is out of limits. | One VDD serves all sessions. A resize would change the picture for the other clients. |
 | D8 | The hotkey is `Ctrl+Alt+Shift+W`. It works only while a stream is active. | `W` is free in Moonlight, GNOME and PaperWM. Used keys: Q, Z, X, S, M, C, D, V, L, E, K (`app/streaming/input/input.cpp:86-138`). The first choice was `R`, but GNOME uses `Ctrl+Alt+Shift+R` for its screen recorder and takes the key before Moonlight in a windowed stream. |
 | D9 | In windowed and borderless full-screen (`SDL_WINDOW_FULLSCREEN_DESKTOP`) mode the target size is `SDL_GetWindowSizeInPixels()`. In exclusive full-screen (`SDL_WINDOW_FULLSCREEN`) it is the desktop mode of `SDL_GetWindowDisplayIndex()`. | Spike S3 (2026-10-09, GNOME 50, monitors at 100 % and 125 %): windowed and borderless full-screen report the real physical size (3840x2160 on the 4K monitor). Exclusive full-screen reports the emulated mode that Moonlight set (1920x1080), so the desktop mode is necessary there. The window display index was wrong once in S3, so exclusive full-screen with two monitors can pick the wrong monitor. This is an accepted limit. |
-| D10 | The client does not save the new size to the settings. | The window size is transient. The saved resolution stays the start size. |
+| D10 | The client does not save the new size to the settings. The client has one new setting, `autoliveresize` (section 5.7). It sets the mode (manual hotkey only, or automatic), not a size. | The window size is transient. The saved resolution stays the start size. The first version had no new settings. The user asked for the automatic mode on 2026-10-09, so the spec now has one setting, off by default. |
 
 Decisions that the user must confirm:
 
@@ -511,27 +511,93 @@ flag, the capture display is physical and the host refuses with
   at start (`VideoStream.c:325`, SDP). It stays at the start size. Nothing in
   the depacketizer depends on it.
 
-### 5.2 Hotkey
+### 5.2 Triggers
+
+Manual trigger (the hotkey, always on):
 
 - `app/streaming/input/input.h/.cpp`: add `KeyComboResizeToWindow` with
   `SDLK_w` / `SDL_SCANCODE_W` to `m_SpecialKeyCombos`.
 - `app/streaming/input/keyboard.cpp` `performSpecialKeyCombo()`: call
   `Session::s_ActiveSession->requestLiveResize()`.
 
-### 5.3 Size computation (`Session::requestLiveResize`)
+Automatic triggers (only when the setting `autoLiveResize` is on, section
+5.7):
 
-1. If `!LiIsLiveResizeSupported()`: show reason 7 and return.
-2. If a request is pending: show "Resize in progress" and return.
+1. Stream start. The FFmpeg decoder pushes `SDL_CODE_FIRST_FRAME_DECODED`
+   (111, `decoder.h`) one time per decoder, after its first decoded frame
+   that it gives to the Pacer. The first of these events arms the automatic
+   triggers (`m_AutoResizeArmed`). A window manager (for example PaperWM)
+   can change the size of a new window after this. The debounce (section
+   5.3) waits until the size is stable.
+2. `SDL_WINDOWEVENT_SIZE_CHANGED`: a drag, a tiling change, or a full-screen
+   change.
+
+Each trigger calls `Session::pumpLiveResize()`. The pump reads the window
+target again each time (`triggerAutoLiveResize()`), because on some
+platforms the full-screen flag changes after the last size event. It does
+not set an automatic target when the window is minimized, when a dimension
+is 0 after the rounding, or when the host has no live resize support (then
+it logs one line per stream and shows no overlay).
+
+The FFmpeg decoder is the only decoder that sends event 111. The Steam Link
+decoder (`slvid.cpp`) does not, so the automatic mode does not arm there.
+
+### 5.3 Size computation and request state
+
+Size computation (`Session::getLiveResizeTarget`, used by both triggers):
+
+1. Manual only: if `!LiIsLiveResizeSupported()`, show reason 7 and return
+   (`requestLiveResize()`).
+2. (Removed. A manual request while one is in flight now goes into the
+   "next size" slot, see below.)
 3. Exclusive full screen (`(SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN`):
    use the desktop mode of the window display,
    `StreamUtils::getNativeDesktopMode(SDL_GetWindowDisplayIndex(m_Window), ...)`
    (used in `session.cpp:1416`). Windowed or borderless full screen:
    `SDL_GetWindowSizeInPixels(m_Window, &w, &h)` (see D9 and spike S3).
-4. Apply D4: `w &= ~1; h &= ~1;`. If `w == m_ActiveVideoWidth && h ==
-   m_ActiveVideoHeight`, return without a message.
-5. Store `m_PendingResize = {w, h, requestId}`, start a 10 second timer
-   (`SDL_AddTimer` that pushes an `SDL_USEREVENT`), call
-   `LiSendResizeRequest(w, h, &requestId)`.
+4. Apply D4: `w &= ~1; h &= ~1;`. A target equal to
+   `m_ActiveVideoWidth x m_ActiveVideoHeight` is dropped without a message.
+5. `pumpLiveResize()` calls `LiSendResizeRequest(w, h, &requestId)`, then
+   `m_ResizeState.sent(w, h, requestId, manual)`, sets the expected size of
+   the decoder, and starts a 10 second timer (`SDL_AddTimer` that pushes
+   `SDL_CODE_RESIZE_TIMEOUT`).
+
+Request state (`LiveResize::ResizeController` in `liveresize.h`, member
+`m_ResizeState`). It has no SDL or Qt dependency. The session passes the time
+(`SDL_GetTicks()`) in. Its rules:
+
+- At most one request is in flight (`inFlight`, a `PendingRequest`).
+- One "next size" slot. `setTarget(w, h, manual, now)` writes it; the latest
+  target wins. An automatic target that equals the slot does not change the
+  time when it became stable.
+- `takeSend()` drops a target that equals the stream size. It drops an
+  automatic target of a size that the host refused (not BUSY) or that timed
+  out. It sends nothing while a request is in flight.
+- Debounce: an automatic target is sent only when it was stable for 500 ms
+  (`DebounceMs`). A manual target is sent at once. Time differences are
+  signed 32-bit, so a wrap of the tick count is safe.
+- When the request in flight ends (frame of the new size, refusal, or
+  timeout), the session calls the pump again. It sends the slot when the
+  rules above allow it.
+- BUSY: retry the latest target after 1 s (`BusyRetryMs`). When the slot is
+  empty, the latest target is the refused size. There is no retry limit.
+- Other refusals and the timeout: the size goes into a list of refused sizes
+  (64 entries at most, the oldest goes first). An automatic target of that
+  size is not sent again. A different size can be sent. A manual request
+  is always sent, also for a refused size.
+- `wakeDelayMs(now)` gives the time until the slot can be sent, or -1 when
+  nothing waits. The pump starts a one-shot `SDL_AddTimer` with this delay.
+  The timer pushes `SDL_CODE_RESIZE_PUMP` (110) with a generation number;
+  an event from an older timer is ignored. The cleanup at the end of
+  `execInternal` removes the timer and calls `m_ResizeState.reset()`.
+- After `applyStreamSize()`, the session sends no request until the new
+  decoder sends event 111 (`m_ResizeWaitingForFrame`). Thus the new decoder
+  has decoded a frame before it sees the next request, and its request frame
+  size is correct (section 5.4).
+
+All calls of `LiSendResizeRequest` are in the pump, on the SDL main thread,
+in the event loop of `execInternal`. This is between `LiStartConnection`
+and `LiStopConnection`. `LiIsLiveResizeSupported` is read only there.
 
 Note on full screen: `app/main.cpp:753` sets
 `SDL_VIDEO_WAYLAND_MODE_SCALING=aspect`, and
@@ -613,15 +679,18 @@ VAAPI direct, DRM and SDL alike.
 
 New `SDL_USEREVENT` codes next to `session.cpp:26-31`:
 `SDL_CODE_RESIZE_REFUSED` (107), `SDL_CODE_RESIZE_TIMEOUT` (108) and
-`SDL_CODE_RESIZE_STATUS_TIMEOUT` (109). `SDL_CODE_STREAM_SIZE_CHANGED` (106)
-is in `decoder.h` (section 5.4).
+`SDL_CODE_RESIZE_STATUS_TIMEOUT` (109), and for the automatic mode
+`SDL_CODE_RESIZE_PUMP` (110). `SDL_CODE_STREAM_SIZE_CHANGED` (106) and
+`SDL_CODE_FIRST_FRAME_DECODED` (111) are in `decoder.h` (sections 5.4 and
+5.2).
 
 On `SDL_CODE_STREAM_SIZE_CHANGED` in `Session::execInternal`,
 `Session::applyStreamSize(w, h)` does these steps:
 
-1. Clear `m_PendingResize`, stop the timer, and set the expected size of
-   the old decoder to `0, 0` (`clearPendingResize()`). If a request was
-   pending and `w x h` is not the requested size, log a warning.
+1. Call `m_ResizeState.ended()`, stop the timer, and set the expected size
+   of the old decoder to `0, 0` (`clearPendingResize()`). If a request was
+   in flight and `w x h` is not the requested size, log a warning. Set
+   `m_ResizeWaitingForFrame` (section 5.3).
 2. `m_ActiveVideoWidth/Height = w, h` (these feed `chooseDecoder` in the
    recreate path, `session.cpp:2270-2274`). Also `m_StreamConfig.width/height`
    for the bitrate and window helpers that read it.
@@ -641,8 +710,9 @@ size is the correct base for the padding rule, and it crops the padding.
 A recreate for another cause while a request is pending (device reset,
 display or refresh-rate change) makes a decoder that has no expected size.
 Thus the `SDL_RENDER_DEVICE_RESET` handler calls
-`setExpectedFrameSize(m_PendingResize.width, m_PendingResize.height)` on the
-new decoder after `chooseDecoder` when `m_PendingResize.active` is set. The
+`setExpectedFrameSize(m_ResizeState.inFlight.width, m_ResizeState.inFlight.height)`
+on the new decoder after `chooseDecoder` when `m_ResizeState.inFlight.active`
+is set. The
 new decoder has no request frame size (`0, 0`). See the residual limit in
 section 5.4.
 
@@ -662,8 +732,9 @@ the current window size.
 Fullscreen toggle after a resize: `toggleFullscreen()` (`session.cpp:1527`)
 and the `SDL_WINDOWEVENT_SIZE_CHANGED` path recreate the decoder with
 `m_ActiveVideoWidth/Height`, which now hold the new size. The stream itself
-does not change on a toggle. The user presses the hotkey again when the
-window size changed.
+does not change on a toggle. In manual mode the user presses the hotkey
+again when the window size changed. In automatic mode the
+`SDL_WINDOWEVENT_SIZE_CHANGED` of the toggle is a trigger (section 5.2).
 
 ### 5.6 Refusal and timeout display
 
@@ -678,12 +749,34 @@ window size changed.
   warning that is on: skip the resize text when `m_MouseEmulationRefCount >
   0` or when the overlay already shows the connection warning. Simple rule:
   keep a `m_StatusOverlayOwner` enum.
-- On `SDL_CODE_RESIZE_TIMEOUT` with a pending request: clear the pending
-  state and show "Host did not answer the resize request".
+- On `SDL_CODE_RESIZE_TIMEOUT` for the request in flight: clear it and
+  show "Host did not answer the resize request" (client reason 8,
+  `ReasonTimeout`).
+- A refusal or timeout for another `request_id` is ignored.
+- `ResizeController::refused()` and `timedOut()` return `show`:
+  - Manual request: always true. A manual BUSY shows the text and is
+    retried after 1 s.
+  - Automatic request, BUSY: false (the client retries).
+  - Automatic request, other reasons and the timeout: true only the first
+    time for this (reason, size). Thus a drag does not show the same text
+    again and again. Reasons that do not depend on the size
+    (MULTIPLE_CLIENTS, NOT_VIRTUAL_DISPLAY) show one time for each new size.
+  - When `show` is false, the session writes the text to the log only.
+- NOT_SUPPORTED (no SDP attribute): the automatic mode writes one log line
+  per stream and shows no overlay (section 5.2).
 
 ### 5.7 Settings
 
-No new settings. The feature is always on when the host advertises it.
+The hotkey is always on when the host advertises the feature. One new
+setting turns on the automatic mode:
+
+- `StreamingPreferences::autoLiveResize`, `Q_PROPERTY` with
+  `autoLiveResizeChanged`. Key in Moonlight.conf: `autoliveresize` (bool).
+  Default: false. Load and save next to `muteonfocusloss`.
+- `SettingsView.qml`: check box "Resize the host display to the stream
+  window automatically", in the input section next to the mouse options
+  (before "Swap left and right mouse buttons"). The tool tip says that it
+  works only with a host that supports live resize.
 
 ## 6. Build and deploy
 
@@ -783,7 +876,15 @@ pointer in `moonlight-qt-mic`.
   is a plain `assert` test of the header-only helpers in
   `app/streaming/liveresize.h`: the size rule (`roundDownEven`), the
   refusal texts, the pending request, and the decoder rule of section 5.4
-  (`classifyFrameSize()` and the new stream size that it gives).
+  (`classifyFrameSize()` and the new stream size that it gives). The
+  `testController*` functions test `ResizeController` (section 5.3): the
+  debounce and a tick wrap; a target equal to the stream size does nothing;
+  a fast sequence of targets during a request gives exactly one follow-up
+  send of the last size; duplicate targets do nothing; BUSY retries after
+  1 s; other refusals and the timeout are not retried for the same size and
+  are shown one time per (reason, size); a refusal for an old `request_id`
+  is ignored; a manual request shares the slot, is sent at once, and its
+  refusal is always shown; `reset()`.
 - common-c: build with `-DUSE_MBEDTLS` off in the toolbox and check that
   `LiSendResizeRequest` returns an error when no connection exists.
 
@@ -820,6 +921,22 @@ app, windowed mode, HDR off, absolute mouse mode on.
     Speak during step 3 and check the host.
 12. Host application test: run a game in windowed mode on the host, resize,
     and check that the game window is still on the VDD after the re-add.
+13. Automatic mode, start: turn on "Resize the host display to the stream
+    window automatically". Start the stream in windowed mode under PaperWM.
+    Expect one request about 500 ms after the window size is stable
+    (`Requested automatic live resize` in the client log) and a stream that
+    fills the window.
+14. Automatic mode, drag: drag the window edge for some seconds. Expect at
+    most one request in flight and, after the drag stops, one request for
+    the last size. Expect no request when the size does not change.
+15. Automatic mode, full screen: toggle full screen (`Ctrl+Alt+Shift+X`) on
+    and off. Expect one request for each new size.
+16. Automatic mode, refusal: connect a second client and drag the window.
+    Expect "Another client is connected" one time for each new size, not
+    for each size event. Expect no repeated request for the same size.
+17. Automatic mode, stock host: expect one log line and no overlay.
+18. Automatic mode with the hotkey: press `Ctrl+Alt+Shift+W` during a
+    request. Expect the window size to be sent after the request ends.
 
 ## 8. Risks and spikes
 
