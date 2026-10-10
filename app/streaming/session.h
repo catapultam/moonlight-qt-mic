@@ -128,7 +128,7 @@ public:
 
     void setShouldExit(bool quitHostApp = false);
 
-    // Asks the host to make the stream equal to the window size (Ctrl+Alt+Shift+R)
+    // Asks the host to make the stream equal to the window size (Ctrl+Alt+Shift+W)
     void requestLiveResize();
 
 signals:

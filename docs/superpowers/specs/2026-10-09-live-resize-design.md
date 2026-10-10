@@ -40,7 +40,7 @@ the same in `0affdaa6`, except that `src/stream.cpp` from line 1398 and
 | D5 | The host replies only on refusal, with a reason code. The client shows the reason in the status overlay for 5 seconds. The client also shows a message when no new-size frame arrives in 10 seconds. | A success needs no message: the new frames are the confirmation. A timeout protects against a lost message. |
 | D6 | The client recreates its decoder and renderer when a decoded frame arrives at the requested size. It uses the existing recreate path (`SDL_RENDER_DEVICE_RESET` handling in `Session::execInternal`). | All renderers get a clean start at the new size. No per-renderer resize code. |
 | D7 | The host refuses the request when more than one client session is active, when the capture display is not a SudoVDA monitor, when a resize is in progress, or when the size is out of limits. | One VDD serves all sessions. A resize would change the picture for the other clients. |
-| D8 | The hotkey is `Ctrl+Alt+Shift+R`. It works only while a stream is active. | `R` is free. Used keys: Q, Z, X, S, M, C, D, V, L, E, K (`app/streaming/input/input.cpp:86-138`). |
+| D8 | The hotkey is `Ctrl+Alt+Shift+W`. It works only while a stream is active. | `W` is free in Moonlight, GNOME and PaperWM. Used keys: Q, Z, X, S, M, C, D, V, L, E, K (`app/streaming/input/input.cpp:86-138`). The first choice was `R`, but GNOME uses `Ctrl+Alt+Shift+R` for its screen recorder and takes the key before Moonlight in a windowed stream. |
 | D9 | In windowed and borderless full-screen (`SDL_WINDOW_FULLSCREEN_DESKTOP`) mode the target size is `SDL_GetWindowSizeInPixels()`. In exclusive full-screen (`SDL_WINDOW_FULLSCREEN`) it is the desktop mode of `SDL_GetWindowDisplayIndex()`. | Spike S3 (2026-10-09, GNOME 50, monitors at 100 % and 125 %): windowed and borderless full-screen report the real physical size (3840x2160 on the 4K monitor). Exclusive full-screen reports the emulated mode that Moonlight set (1920x1080), so the desktop mode is necessary there. The window display index was wrong once in S3, so exclusive full-screen with two monitors can pick the wrong monitor. This is an accepted limit. |
 | D10 | The client does not save the new size to the settings. | The window size is transient. The saved resolution stays the start size. |
 
@@ -498,7 +498,7 @@ flag, the capture display is physical and the host refuses with
 ### 5.2 Hotkey
 
 - `app/streaming/input/input.h/.cpp`: add `KeyComboResizeToWindow` with
-  `SDLK_r` / `SDL_SCANCODE_R` to `m_SpecialKeyCombos`.
+  `SDLK_w` / `SDL_SCANCODE_W` to `m_SpecialKeyCombos`.
 - `app/streaming/input/keyboard.cpp` `performSpecialKeyCombo()`: call
   `Session::get()->requestLiveResize()`.
 
@@ -764,14 +764,14 @@ app, windowed mode, HDR off, absolute mouse mode on.
 1. Start the stream at the saved size (for example 2560x1600). Check the
    host log for `Virtual Display created`.
 2. Resize the window to an odd size, for example 2537x1391 logical pixels
-   with scale 1. Press `Ctrl+Alt+Shift+R`.
+   with scale 1. Press `Ctrl+Alt+Shift+W`.
 3. Expect within about 2 seconds: the host log shows the VDD remove and
    create, `Desktop resolution [2536x1390]`, a new encoder at 2536x1390. The
    client log shows `Recreating renderer` and `Video stream is 2536x1390`.
    The picture fills the window without bars and without blur.
 4. Move the mouse to the four window corners. The host cursor reaches the
    display corners. Click a desktop icon in the bottom right corner.
-5. Press `Ctrl+Alt+Shift+R` again without a window change. Expect no
+5. Press `Ctrl+Alt+Shift+W` again without a window change. Expect no
    message and no host log entry.
 6. Toggle full screen (`Ctrl+Alt+Shift+X`). Press the hotkey. Expect the
    native mode of that display, for example 3840x2160.
